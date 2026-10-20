@@ -52,8 +52,6 @@ th, td { text-align: left; padding: 0.5em; border-bottom: 1px solid #eee; }
     .container { padding: 0.8em; }
     .topbar { flex-direction: column; align-items: flex-start; gap: 0.4em; }
     .card { padding: 0.8em; }
-
-    /* 创建表单：每个字段独占一行 */
     form { display: block; width: 100%; }
     form input, form select {
         display: block;
@@ -66,8 +64,6 @@ th, td { text-align: left; padding: 0.5em; border-bottom: 1px solid #eee; }
         width: 100%;
         margin: 6px 0 0 0;
     }
-
-    /* 实例卡片里的操作按钮：横排等宽，不占满三行 */
     .card form { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
     .card form button {
         flex: 1 1 auto;
@@ -75,12 +71,11 @@ th, td { text-align: left; padding: 0.5em; border-bottom: 1px solid #eee; }
         margin: 0 !important;
         min-width: 72px;
     }
-
     th, td { padding: 0.4em; font-size: 0.9em; }
 }
 "#;
 
-pub fn layout(user: Option<&User>, body: Markup) -> Markup {
+pub fn layout(user: Option<&User>, body: Markup, csrf_token: &str) -> Markup {
     html! {
         (DOCTYPE)
         html {
@@ -103,7 +98,10 @@ pub fn layout(user: Option<&User>, body: Markup) -> Markup {
                                 " | "
                                 a href="/admin/users" { "用户管理" }
                                 " | "
-                                a href="/logout" { "退出" }
+                                form method="post" action="/logout" {
+                                    input type="hidden" name="csrf_token" value=(csrf_token);
+                                    button type="submit" class="btn" { "退出" }
+                                }
                             }
                         }
                     }
@@ -114,33 +112,35 @@ pub fn layout(user: Option<&User>, body: Markup) -> Markup {
     }
 }
 
-pub fn login_page(err: bool) -> Markup {
+pub fn login_page(err: bool, csrf_token: &str) -> Markup {
     layout(None, html! {
         div .card style="max-width: 400px; margin: 4em auto;" {
             h2 { "登录" }
             @if err { p .err { "用户名或密码错误" } }
             form method="post" action="/login" {
+                input type="hidden" name="csrf_token" value=(csrf_token);
                 p { input name="username" placeholder="用户名" required style="width:100%"; }
                 p { input name="password" type="password" placeholder="密码" required style="width:100%"; }
                 p { button type="submit" class="btn btn-primary" style="width:100%" { "登录" } }
             }
         }
-    })
+    }, csrf_token)
 }
 
-pub fn change_password_page(err: Option<&str>) -> Markup {
+pub fn change_password_page(err: Option<&str>, csrf_token: &str) -> Markup {
     layout(None, html! {
         div .card style="max-width: 420px; margin: 4em auto;" {
             h2 { "修改密码" }
             p { "首次登录或密码被重置，请设置新密码。" }
             @if let Some(e) = err { p .err { (e) } }
             form method="post" action="/change-password" {
+                input type="hidden" name="csrf_token" value=(csrf_token);
                 p { input name="new_password" type="password" placeholder="新密码（至少 8 位）" required style="width:100%"; }
                 p { input name="confirm" type="password" placeholder="确认新密码" required style="width:100%"; }
                 p { button type="submit" class="btn btn-primary" style="width:100%" { "提交" } }
             }
         }
-    })
+    }, csrf_token)
 }
 
 pub fn index_page(
@@ -148,6 +148,7 @@ pub fn index_page(
     instances: &[InstanceInfo],
     config: &Config,
     err: Option<&str>,
+    csrf_token: &str,
 ) -> Markup {
     let err_msg = match err {
         Some("exists") => Some("实例名称已被占用，请换一个名称"),
@@ -164,6 +165,7 @@ pub fn index_page(
         div .card {
             h3 { "创建新实例" }
             form method="post" action="/instances" {
+                input type="hidden" name="csrf_token" value=(csrf_token);
                 input name="name" placeholder="实例名称（小写字母/数字/-）" required;
                 input name="mem" type="number" value="1024" min="256" max="8192" style="width:90px" placeholder="内存MB";
                 input name="cpus" type="number" step="0.1" value="1" min="0.1" max="8" style="width:70px" placeholder="CPU";
@@ -190,6 +192,7 @@ pub fn index_page(
                     }
                     br;
                     form method="post" action={ "/instances/" (inst.name) "/action" } {
+                        input type="hidden" name="csrf_token" value=(csrf_token);
                         button name="act" value="start" class="btn" { "启动" }
                         button name="act" value="stop" class="btn" { "停止" }
                         button name="act" value="remove" class="btn btn-danger"
@@ -198,19 +201,21 @@ pub fn index_page(
                 }
             }
         }
-    })
+    }, csrf_token)
 }
 
 pub fn admin_users_page(
     user: &User,
     users: &[(i64, String, String, i64)],
     message: Option<&str>,
+    csrf_token: &str,
 ) -> Markup {
     layout(Some(user), html! {
         h3 { "用户管理" }
         @if let Some(m) = message { div .card .ok { (m) } }
         div .card {
             form method="post" action="/admin/users" {
+                input type="hidden" name="csrf_token" value=(csrf_token);
                 input name="username" placeholder="新用户名" required;
                 select name="role" {
                     option value="member" { "member" }
@@ -235,11 +240,13 @@ pub fn admin_users_page(
                             td {
                                 form method="post" action={ "/admin/users/" (id) "/reset" } style="display:inline"
                                     onsubmit="return confirm('确认重置该用户密码？\n\n后果：\n1. 该用户所有已登录会话立即失效，正在使用的页面会被踢下线；\n2. 生成新的临时密码，页面只显示一次，需线下转交；\n3. 用户下次登录会被强制改密。')" {
+                                    input type="hidden" name="csrf_token" value=(csrf_token);
                                     button type="submit" class="btn" { "重置密码" }
                                 }
                                 @if *id != user.id {
                                     form method="post" action={ "/admin/users/" (id) "/delete" } style="display:inline"
                                         onsubmit="return confirm('确认删除该用户？其所有会话会立即失效，且不可恢复。')" {
+                                        input type="hidden" name="csrf_token" value=(csrf_token);
                                         button type="submit" class="btn btn-danger" { "删除" }
                                     }
                                 } @else {
@@ -251,5 +258,5 @@ pub fn admin_users_page(
                 }
             }
         }
-    })
+    }, csrf_token)
 }

@@ -6,17 +6,17 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use rand::RngCore;
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 
 use crate::auth::{self, User};
 use crate::docker_ops::{self, CreateSpec};
 use crate::templates;
-use crate::AppState;
+use crate::{AppState, Config};
 
 const COOKIE_NAME: &str = "cs_session";
-
-// ---------- 表单结构 ----------
+const CSRF_COOKIE_NAME: &str = "cs_csrf";
 
 #[derive(Deserialize)]
 pub struct IndexQuery {
@@ -32,6 +32,7 @@ pub struct LoginQuery {
 pub struct LoginForm {
     pub username: String,
     pub password: String,
+    pub csrf_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -40,31 +41,38 @@ pub struct CreateForm {
     pub mem: u32,
     pub cpus: f32,
     pub git: Option<String>,
+    pub csrf_token: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct ActionForm {
     pub act: String,
+    pub csrf_token: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct ChangePasswordForm {
     pub new_password: String,
     pub confirm: String,
+    pub csrf_token: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct CreateUserForm {
     pub username: String,
     pub role: String,
+    pub csrf_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CsrfForm {
+    pub csrf_token: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct VerifyQuery {
     pub instance: String,
 }
-
-// ---------- 辅助 ----------
 
 async fn current(state: &AppState, jar: &CookieJar) -> Option<(User, String, String)> {
     let token = jar.get(COOKIE_NAME)?.value().to_string();
@@ -81,9 +89,7 @@ async fn load_users(state: &AppState) -> Vec<(i64, String, String, i64)> {
         Ok(s) => s,
         Err(_) => return vec![],
     };
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    });
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)));
     match rows {
         Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
         Err(_) => vec![],
@@ -100,9 +106,52 @@ fn sanitize_name(s: &str) -> String {
     cleaned.trim_matches('-').to_string()
 }
 
-fn set_cookie_header(resp: &mut Response, value: &str) {
+fn set_cookie_header<B>(resp: &mut axum::http::Response<B>, value: &str) {
     if let Ok(v) = HeaderValue::from_str(value) {
         resp.headers_mut().append(SET_COOKIE, v);
+    }
+}
+
+fn generate_csrf_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn csrf_cookie(token: &str, domain: Option<&str>) -> String {
+    let mut s = format!(
+        "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        CSRF_COOKIE_NAME,
+        token,
+        86400 * 7
+    );
+    if let Some(d) = domain {
+        s.push_str(&format!("; Domain={}", d));
+    }
+    s
+}
+
+fn get_or_create_csrf_token<B>(
+    resp: &mut axum::http::Response<B>,
+    jar: &CookieJar,
+    domain: Option<&str>,
+) -> String {
+    if let Some(cookie) = jar.get(CSRF_COOKIE_NAME) {
+        return cookie.value().to_string();
+    }
+    let token = generate_csrf_token();
+    set_cookie_header(resp, &csrf_cookie(&token, domain));
+    token
+}
+
+fn validate_csrf_token(jar: &CookieJar, token: Option<&str>) -> bool {
+    let expected = match jar.get(CSRF_COOKIE_NAME) {
+        Some(c) => c.value().to_string(),
+        None => return false,
+    };
+    match token.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(v) => v == expected,
+        None => false,
     }
 }
 
@@ -130,16 +179,25 @@ fn clear_cookie(domain: Option<&str>) -> String {
     s
 }
 
-// ---------- 登录 / 登出 ----------
-
-pub async fn login_page(Query(q): Query<LoginQuery>) -> impl IntoResponse {
-    templates::login_page(q.err.is_some())
+pub async fn login_page(Query(q): Query<LoginQuery>, jar: CookieJar) -> Response {
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, None);
+    let mut page = templates::login_page(q.err.is_some(), &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
 }
 
 pub async fn login_submit(
     State(state): State<AppState>,
+    jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let db = state.db.lock().await;
     let row: Option<(i64, String, i64)> = db
         .query_row(
@@ -183,7 +241,15 @@ pub async fn login_submit(
     resp
 }
 
-pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
+pub async fn logout(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     if let Some(c) = jar.get(COOKIE_NAME) {
         let db = state.db.lock().await;
         let _ = auth::delete_session(&db, c.value());
@@ -192,8 +258,6 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Response {
     set_cookie_header(&mut resp, &clear_cookie(state.config.cookie_domain.as_deref()));
     resp
 }
-
-// ---------- 首页 ----------
 
 pub async fn index(
     State(state): State<AppState>,
@@ -217,16 +281,24 @@ pub async fn index(
         .await
         .unwrap_or_default();
 
-    templates::index_page(&user, &instances, &state.config, q.err.as_deref()).into_response()
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+    let mut page = templates::index_page(&user, &instances, &state.config, q.err.as_deref(), &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
 }
-
-// ---------- 实例操作 ----------
 
 pub async fn create_instance(
     State(state): State<AppState>,
     jar: CookieJar,
     Form(form): Form<CreateForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let (user, kind, _) = match current(&state, &jar).await {
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
@@ -242,7 +314,6 @@ pub async fn create_instance(
     let mem = form.mem.clamp(256, 8192);
     let cpus = form.cpus.clamp(0.1, 8.0);
 
-    // 容器名全局唯一，先查 Docker 里是否已存在
     if state.docker.inspect_container(&name, None).await.is_ok() {
         return Redirect::to("/?err=exists").into_response();
     }
@@ -255,14 +326,12 @@ pub async fn create_instance(
         .map(|i| i.port)
         .filter(|p| *p > 0)
         .collect();
-    let port = match docker_ops::pick_free_port(&used, state.config.port_min, state.config.port_max)
-    {
+    let port = match docker_ops::pick_free_port(&used, state.config.port_min, state.config.port_max) {
         Some(p) => p,
         None => return Redirect::to("/?err=port").into_response(),
     };
 
     let git = form.git.as_deref().map(str::trim).filter(|s| !s.is_empty());
-
     let spec = CreateSpec {
         name: &name,
         owner: &user.username,
@@ -287,6 +356,10 @@ pub async fn instance_action(
     Path(name): Path<String>,
     Form(form): Form<ActionForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let (user, kind, _) = match current(&state, &jar).await {
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
@@ -318,8 +391,6 @@ pub async fn instance_action(
     Redirect::to("/").into_response()
 }
 
-// ---------- 改密 ----------
-
 pub async fn change_password_page(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -328,7 +399,13 @@ pub async fn change_password_page(
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
     };
-    templates::change_password_page(None).into_response()
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+    let mut page = templates::change_password_page(None, &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
 }
 
 pub async fn change_password_submit(
@@ -336,21 +413,45 @@ pub async fn change_password_submit(
     jar: CookieJar,
     Form(form): Form<ChangePasswordForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let (user, _, _) = match current(&state, &jar).await {
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
     };
     if form.new_password.len() < 8 {
-        return templates::change_password_page(Some("密码至少 8 位")).into_response();
+        let mut resp = Response::new(());
+        let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+        let mut page = templates::change_password_page(Some("密码至少 8 位"), &token).into_response();
+        for (name, value) in resp.headers().iter() {
+            page.headers_mut().insert(name, value.clone());
+        }
+        return page;
     }
     if form.new_password != form.confirm {
-        return templates::change_password_page(Some("两次输入不一致")).into_response();
+        let mut resp = Response::new(());
+        let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+        let mut page = templates::change_password_page(Some("两次输入不一致"), &token).into_response();
+        for (name, value) in resp.headers().iter() {
+            page.headers_mut().insert(name, value.clone());
+        }
+        return page;
     }
 
     let pw = form.new_password.clone();
     let hash = match tokio::task::spawn_blocking(move || auth::hash_password(&pw)).await {
         Ok(h) => h,
-        Err(_) => return templates::change_password_page(Some("哈希失败")).into_response(),
+        Err(_) => {
+            let mut resp = Response::new(());
+            let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+            let mut page = templates::change_password_page(Some("哈希失败"), &token).into_response();
+            for (name, value) in resp.headers().iter() {
+                page.headers_mut().insert(name, value.clone());
+            }
+            return page;
+        }
     };
 
     let db = state.db.lock().await;
@@ -372,8 +473,6 @@ pub async fn change_password_submit(
     resp
 }
 
-// ---------- 管理员：用户管理 ----------
-
 pub async fn admin_users_page(State(state): State<AppState>, jar: CookieJar) -> Response {
     let (user, kind, _) = match current(&state, &jar).await {
         Some(v) => v,
@@ -385,8 +484,15 @@ pub async fn admin_users_page(State(state): State<AppState>, jar: CookieJar) -> 
     if user.role != "admin" {
         return (StatusCode::FORBIDDEN, "仅管理员可访问").into_response();
     }
+
     let users = load_users(&state).await;
-    templates::admin_users_page(&user, &users, None).into_response()
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+    let mut page = templates::admin_users_page(&user, &users, None, &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
 }
 
 pub async fn admin_create_user(
@@ -394,6 +500,10 @@ pub async fn admin_create_user(
     jar: CookieJar,
     Form(form): Form<CreateUserForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let (user, kind, _) = match current(&state, &jar).await {
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
@@ -437,7 +547,13 @@ pub async fn admin_create_user(
                 username, temp
             );
             let users = load_users(&state).await;
-            templates::admin_users_page(&user, &users, Some(msg.as_str())).into_response()
+            let mut resp = Response::new(());
+            let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+            let mut page = templates::admin_users_page(&user, &users, Some(msg.as_str()), &token).into_response();
+            for (name, value) in resp.headers().iter() {
+                page.headers_mut().insert(name, value.clone());
+            }
+            page
         }
         Err(_) => Redirect::to("/admin/users?err=dup").into_response(),
     }
@@ -447,7 +563,12 @@ pub async fn admin_reset_password(
     State(state): State<AppState>,
     jar: CookieJar,
     Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let (user, kind, _) = match current(&state, &jar).await {
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
@@ -479,10 +600,14 @@ pub async fn admin_reset_password(
         id, temp
     );
     let users = load_users(&state).await;
-    templates::admin_users_page(&user, &users, Some(msg.as_str())).into_response()
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+    let mut page = templates::admin_users_page(&user, &users, Some(msg.as_str()), &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
 }
-
-// ---------- Nginx auth_request 校验端点 ----------
 
 pub async fn auth_verify(
     State(state): State<AppState>,
@@ -496,7 +621,7 @@ pub async fn auth_verify(
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
     if kind == "pending_reset" || user.must_change_password {
-        return StatusCode::PRECONDITION_REQUIRED.into_response(); // 428
+        return StatusCode::PRECONDITION_REQUIRED.into_response();
     }
 
     let info = match state.docker.inspect_container(&q.instance, None).await {
@@ -532,7 +657,12 @@ pub async fn admin_delete_user(
     State(state): State<AppState>,
     jar: CookieJar,
     Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
     let (user, kind, _) = match current(&state, &jar).await {
         Some(v) => v,
         None => return Redirect::to("/login").into_response(),
@@ -544,12 +674,10 @@ pub async fn admin_delete_user(
         return (StatusCode::FORBIDDEN, "仅管理员可操作").into_response();
     }
 
-    // 1. 不能删除自己
     if user.id == id {
         return Redirect::to("/admin/users?err=self").into_response();
     }
 
-    // 查目标用户
     let db = state.db.lock().await;
     let target: Option<(String, String)> = db
         .query_row(
@@ -565,7 +693,6 @@ pub async fn admin_delete_user(
         None => return Redirect::to("/admin/users?err=notfound").into_response(),
     };
 
-    // 2. 不能删除最后一个 admin
     if role == "admin" {
         let admin_count: i64 = db
             .query_row("SELECT COUNT(*) FROM users WHERE role='admin'", [], |r| r.get(0))
@@ -576,7 +703,6 @@ pub async fn admin_delete_user(
     }
     drop(db);
 
-    // 3. 该用户还有实例时拒绝删除
     let instances = docker_ops::list_instances(&state.docker, Some(&username))
         .await
         .unwrap_or_default();
@@ -589,10 +715,15 @@ pub async fn admin_delete_user(
             names.join(", ")
         );
         let users = load_users(&state).await;
-        return templates::admin_users_page(&user, &users, Some(&msg)).into_response();
+        let mut resp = Response::new(());
+        let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+        let mut page = templates::admin_users_page(&user, &users, Some(&msg), &token).into_response();
+        for (name, value) in resp.headers().iter() {
+            page.headers_mut().insert(name, value.clone());
+        }
+        return page;
     }
 
-    // 4. 执行删除，sessions 通过外键级联清理
     let db = state.db.lock().await;
     let res = db.execute("DELETE FROM users WHERE id = ?1", params![id]);
     drop(db);
@@ -602,5 +733,88 @@ pub async fn admin_delete_user(
         Err(e) => format!("删除失败：{}", e),
     };
     let users = load_users(&state).await;
-    templates::admin_users_page(&user, &users, Some(&msg)).into_response()
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+    let mut page = templates::admin_users_page(&user, &users, Some(&msg), &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum_extra::extract::cookie::Cookie;
+
+    #[test]
+    fn csrf_token_must_match_cookie_value() {
+        let cookie = Cookie::build((CSRF_COOKIE_NAME, "token-123")).path("/").build();
+        let jar = CookieJar::new().add(cookie);
+
+        assert!(validate_csrf_token(&jar, Some("token-123")));
+        assert!(!validate_csrf_token(&jar, Some("wrong-token")));
+        assert!(!validate_csrf_token(&jar, None));
+    }
+
+    #[test]
+    fn pages_include_hidden_csrf_field() {
+        let html = templates::index_page(
+            &User {
+                id: 7,
+                username: "alice".into(),
+                role: "member".into(),
+                must_change_password: false,
+            },
+            &[docker_ops::InstanceInfo {
+                name: "devbox".into(),
+                state: "running".into(),
+                port: 8200,
+                mem: 1024,
+                cpus: 1.0,
+                owner: "alice".into(),
+            }],
+            &Config {
+                hostname_suffix: "example.com".into(),
+                base_dir: "/tmp".into(),
+                port_min: 8200,
+                port_max: 8299,
+                image: "codercom/code-server:latest".into(),
+                cookie_domain: None,
+            },
+            None,
+            "token-456",
+        )
+        .into_string();
+
+        assert!(html.contains("name=\"csrf_token\""));
+        assert!(html.contains("value=\"token-456\""));
+        assert_eq!(html.matches("name=\"csrf_token\"").count(), 3);
+        assert!(html.contains("<form method=\"post\" action=\"/logout\">"));
+    }
+
+    #[test]
+    fn login_password_and_admin_pages_include_csrf_fields() {
+        let user = User {
+            id: 7,
+            username: "alice".into(),
+            role: "admin".into(),
+            must_change_password: false,
+        };
+        let token = "token-789";
+        let login = templates::login_page(false, token).into_string();
+        let password = templates::change_password_page(None, token).into_string();
+        let admin = templates::admin_users_page(
+            &user,
+            &[(8, "bob".into(), "member".into(), 0)],
+            None,
+            token,
+        )
+        .into_string();
+
+        assert_eq!(login.matches("name=\"csrf_token\"").count(), 1);
+        assert_eq!(password.matches("name=\"csrf_token\"").count(), 1);
+        assert_eq!(admin.matches("name=\"csrf_token\"").count(), 4);
+        assert!(admin.matches("value=\"token-789\"").count() == 4);
+    }
 }

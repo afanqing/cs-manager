@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/login", get(handlers::login_page).post(handlers::login_submit))
-        .route("/logout", get(handlers::logout))
+        .route("/logout", post(handlers::logout))
         .route("/", get(handlers::index))
         .route("/instances", post(handlers::create_instance))
         .route("/instances/:name/action", post(handlers::instance_action))
