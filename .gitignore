@@ -1,0 +1,22 @@
+# Rust 构建产物
+/target/
+**/*.rs.bk
+*.pdb
+
+# 运行时数据（数据库、实例、上传文件）
+/data/
+/instances/
+
+# 环境变量与密钥
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~

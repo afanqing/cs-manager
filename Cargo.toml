@@ -1,0 +1,26 @@
+[package]
+name = "cs-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+argon2 = "0.5"
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["cookie"] }
+bollard = "0.16"
+maud = { version = "0.26", features = ["axum"] }
+rand = "0.8"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
