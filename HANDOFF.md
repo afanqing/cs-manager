@@ -7,9 +7,12 @@
 ## 当前代码状态
 
 - 分支：`feature/csrf-protection`
-- 最近功能提交：`2c5d409`，CSRF 表单保护；已推送到 `origin/feature/csrf-protection`
-- 验证：`cargo test --quiet`，3 个测试通过
-- 本轮改动尚未部署到生产环境；部署后仍需验证反向代理和浏览器实际行为
+- 资源功能提交：`3cf34a3`，容器资源运行时调整与面板反馈；已推送到 `origin/feature/csrf-protection`
+- 前序提交：`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
+- 工作区状态：最近核对时干净；本地与 `origin/feature/csrf-protection` 指向同一提交
+- 验证：`CARGO_BUILD_JOBS=2 cargo test --quiet -- --test-threads=1`，8 个测试通过
+- 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交 `3cf34a3` 尚未确认。上线后需在实例卡片确认“更新资源”及成功/失败提示已出现
+- 开发环境提示：若 Cargo 编译异常缓慢，先检查并清理遗留的 `cargo` / `rustc` 进程；本环境使用 `CARGO_BUILD_JOBS=2` 可避免并发过高
 
 ---
 
@@ -35,6 +38,7 @@
 |---|---|
 | 每项目独立容器 | `docker run` 时绑定独立数据目录和端口 |
 | 资源硬限制 | Docker `--memory` / `--cpus` / `--pids-limit`（cgroup 内核级） |
+| 运行时调整资源 | 从实例卡片更新内存和 CPU，不删除或重建容器 |
 | 多用户登录 | SQLite + argon2 哈希 + HttpOnly 会话 Cookie |
 | 强制首次改密 | `must_change_password` 标志 + 受限会话 |
 | CSRF 防护 | 随机 Cookie token + POST 表单隐藏字段，服务端逐请求校验 |
@@ -202,7 +206,9 @@ code-server 返回 IDE 界面
 
 **`docker_ops.rs`**
 - `list_instances`：按 label 过滤，可加 owner 条件
+- `list_instances`：读取 Docker inspect 的实际内存和 NanoCPUs 限制，兼容旧 label 回退值
 - `create_instance`：创建目录 → git clone（blocking）→ chown 1000 → 构造容器配置 → create + start
+- `validate_resource_limits` / `update_resources`：校验边界并调用 Bollard `update_container` 原地更新 Memory 与 NanoCPUs
 - `start` / `stop` / `remove`
 - `pick_free_port`：从 8200–8299 找空闲
 
@@ -211,6 +217,7 @@ code-server 返回 IDE 界面
 - 登录、改密、实例操作和用户管理等 POST handler 校验 CSRF token；退出使用 POST
 - `index`：按角色过滤实例，显示错误
 - `create_instance`：查重 → 分配端口 → 调 docker_ops
+- `update_instance_resources`：CSRF、登录状态、实例归属和数值校验后更新资源；成功/失败通过首页 query 状态反馈
 - `instance_action`：启停删，校验归属
 - `change_password_page` / `change_password_submit`
 - `admin_users_page` / `admin_create_user` / `admin_reset_password`
@@ -219,6 +226,7 @@ code-server 返回 IDE 界面
 **`templates.rs`**
 - `layout`：公共外壳（顶栏、样式）
 - `login_page` / `change_password_page` / `index_page` / `admin_users_page`
+- 首页实例卡片：当前内存/CPU、资源编辑表单、成功/错误状态提示
 - 实例卡片"打开"链接生成 `https://cs-<name>.<domain>/`
 
 ---
@@ -636,6 +644,24 @@ curl -6 -I https://cs.afanai.top/login
 rm -rf /opt/code/cs-manager/instances/<name>
 ```
 
+### 8.9 运行时调整容器资源
+
+登录面板首页，在实例卡片中修改内存和 CPU 后点“更新资源”。当前范围：内存 `256–8192 MB`，CPU `0.1–8` 核。更新通过 Docker `update_container` 应用于现有容器，不停止、不删除、不重建，也不需要重启 code-server。
+
+成功后首页显示确认提示，并重新读取 Docker 的实际限制。失败时：
+
+- 越界会显示允许范围，不会静默改成边界值；
+- Docker 拒绝更新时会提示检查容器状态；若降低内存，先用 `docker stats <name> --no-stream` 确认当前使用量低于目标值后再试。
+
+检查 Docker 当前配置（内存单位是字节，`NanoCpus` 除以 `1_000_000_000` 得到核数）：
+
+```bash
+docker inspect <name> --format 'memory={{.HostConfig.Memory}} nano_cpus={{.HostConfig.NanoCpus}}'
+docker stats <name> --no-stream
+```
+
+资源更新表单与其他 POST 操作一样受 CSRF 保护，后端还会检查登录状态、实例归属和范围。列表页为显示每个容器的实际配置，会对列出的容器调用 Docker inspect；如果容器数量显著增长，需关注首页响应时间。
+
 ---
 
 ## 9. 安全模型与边界
@@ -694,6 +720,8 @@ rm -rf /opt/code/cs-manager/instances/<name>
 | 面板是单点 | 面板挂了，实例访问 500 | 单机场景，Restart=always 已把中断压到 2 秒级 |
 | 只有 IPv6 公网 | 纯 IPv4 网络无法访问 | 服务器网络环境决定，非本项目可控 |
 | 会话 7 天过期 | 需要定期重新登录 | 安全与便利的平衡 |
+| 资源更新依赖 Docker daemon 支持 update API | 某些 Docker 版本/运行时配置可能拒绝在线修改 | 失败会留在原限制；查看面板日志与 `docker inspect`，不要通过删除容器来“修复” |
+| 降低内存可能被 Docker 拒绝 | 当前使用量高于目标值时不能应用新上限 | 先用 `docker stats` 检查；降低目标前等待使用量回落 |
 | 临时密码人工传递 | 传递渠道安全性依赖团队 | 引入邮件服务增加复杂度，当前团队规模不需要 |
 | root 运行面板 | 面板被攻破 = 宿主机失守 | 单机受控环境可接受，rootless 留作后续 |
 | 无审计日志 | 无法追溯谁做了什么 | 当前规模不需要，未来可加表 |
@@ -975,6 +1003,9 @@ CREATE TABLE sessions (
 - [ ] 跑一遍 §8.1 的服务管理命令，确认能看状态、看日志
 - [ ] 跑一遍 §8.3 的实例管理命令，确认能看到所有容器
 - [ ] 登录面板，创建一个测试实例，走一遍 §5.8 的验证清单
+- [ ] 确认生产 release 包含顶部“当前代码状态”所列的最新提交；在首页实例卡片确认“更新资源”控件与成功/错误提示存在
+- [ ] 用测试实例验证内存/CPU 在线修改、成功后 Docker inspect 数值及 `State.StartedAt`；确认没有重启或重建
+- [ ] 在开发环境运行 `CARGO_BUILD_JOBS=2 cargo test --quiet -- --test-threads=1`，当前预期 8 个测试通过
 - [ ] 读 §9 安全模型，理解"绝对不能做的事"
 - [ ] 确认备份策略（§8.4）已配置
 - [ ] 把维护者联系方式更新到本文档顶部
