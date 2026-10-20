@@ -4,6 +4,13 @@
 > 维护者：（请在此填写）
 > 交接对象：（请在此填写）
 
+## 当前代码状态
+
+- 分支：`feature/csrf-protection`
+- 最近功能提交：`2c5d409`，CSRF 表单保护；已推送到 `origin/feature/csrf-protection`
+- 验证：`cargo test --quiet`，3 个测试通过
+- 本轮改动尚未部署到生产环境；部署后仍需验证反向代理和浏览器实际行为
+
 ---
 
 ## 1. 项目是什么
@@ -30,6 +37,7 @@
 | 资源硬限制 | Docker `--memory` / `--cpus` / `--pids-limit`（cgroup 内核级） |
 | 多用户登录 | SQLite + argon2 哈希 + HttpOnly 会话 Cookie |
 | 强制首次改密 | `must_change_password` 标志 + 受限会话 |
+| CSRF 防护 | 随机 Cookie token + POST 表单隐藏字段，服务端逐请求校验 |
 | 实例归属隔离 | Docker label `cs-owner` + 查询时过滤 |
 | 实例端口隐身 | 只绑 `127.0.0.1`，外部唯一入口是 Nginx |
 | 访问鉴权 | Nginx `auth_request` 每次转发前问面板 |
@@ -200,6 +208,7 @@ code-server 返回 IDE 界面
 
 **`handlers.rs`**
 - `login_page` / `login_submit` / `logout`
+- 登录、改密、实例操作和用户管理等 POST handler 校验 CSRF token；退出使用 POST
 - `index`：按角色过滤实例，显示错误
 - `create_instance`：查重 → 分配端口 → 调 docker_ops
 - `instance_action`：启停删，校验归属
@@ -638,13 +647,21 @@ rm -rf /opt/code/cs-manager/instances/<name>
 | 网络 | 实例端口只绑 `127.0.0.1` | 外部无法直连实例 |
 | 入口 | Nginx 唯一公网入口，TLS 终止 | 所有流量经鉴权 |
 | 鉴权 | `auth_request` 每次转发前问面板 | 未授权请求被拒 |
-| 会话 | HttpOnly + SameSite=Lax Cookie | JS 无法读取 token |
+| 会话与 CSRF | HttpOnly + SameSite=Lax 会话 Cookie；状态变更 POST 校验表单 token | 跨站请求缺少有效 token 时被拒绝 |
 | 密码 | argon2id 哈希 | 数据库泄露也难爆破 |
 | 归属 | Docker label `cs-owner` + 查询过滤 | 用户只能管自己的实例 |
 | 资源 | cgroup 硬限制 | 单实例失控不波及宿主 |
 | 进程 | systemd `NoNewPrivileges=true` | 面板无法提权 |
 
-### 9.2 当前的安全边界（必须知道）
+### 9.2 CSRF 防护
+
+- 页面首次渲染时生成随机 CSRF token，并通过 `cs_csrf` Cookie 保存；POST 表单同时包含隐藏字段 `csrf_token`。
+- 服务端对 Cookie token 和表单 token 做匹配校验；缺少或不匹配时返回 `403`。
+- 登录、创建实例、实例启停/删除、修改密码、用户创建/重置/删除以及退出均受保护。
+- 退出路由是 `POST /logout`，不再通过 GET 请求改变会话状态。
+- CSRF token Cookie 使用 `HttpOnly` 和 `SameSite=Lax`；token 会被渲染进本站表单。该机制不替代 XSS 防护，同源脚本注入仍可读取页面内容并代表用户操作。
+
+### 9.3 当前的安全边界（必须知道）
 
 1. **面板以 root 运行，持有 `/var/run/docker.sock`**。Docker socket 权限等同宿主机 root。面板被攻破 = 宿主机失守。当前接受这个风险，因为：
    - 面板只监听 `127.0.0.1`，不直接暴露；
@@ -655,11 +672,11 @@ rm -rf /opt/code/cs-manager/instances/<name>
 
 2. **临时密码传递靠人工**。方案保证"一次性 + 强制改密 + 改密后旧会话全失效"，但传递渠道（微信/口头）的安全性由团队约定。
 
-3. **Cookie 域是 `.afanai.top`**，会发到所有子域名，包括 v6-codehub、v6-vscode。如果那些站点有 XSS，理论上能发起 CSRF（虽然 HttpOnly 阻止读取 token）。
+3. **Cookie 域是 `.afanai.top`**，会发到所有子域名，包括 v6-codehub、v6-vscode。CSRF token 校验降低了跨站伪造请求风险，但不能防止本站 XSS；共享 Cookie 域仍扩大了 Cookie 的发送范围。
 
 4. **`--auth none`**：code-server 容器内部不做认证，完全依赖外层 Nginx + 面板鉴权。**绝对不能把实例端口暴露到公网**。
 
-### 9.3 绝对不要做的事
+### 9.4 绝对不要做的事
 
 - ❌ 把 8100 或 8200–8299 端口开放到公网；
 - ❌ 把容器的 `host_ip` 从 `127.0.0.1` 改成 `0.0.0.0`；
