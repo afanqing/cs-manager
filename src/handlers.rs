@@ -21,6 +21,7 @@ const CSRF_COOKIE_NAME: &str = "cs_csrf";
 #[derive(Deserialize)]
 pub struct IndexQuery {
     pub err: Option<String>,
+    pub ok: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +48,13 @@ pub struct CreateForm {
 #[derive(Deserialize)]
 pub struct ActionForm {
     pub act: String,
+    pub csrf_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ResourceUpdateForm {
+    pub mem: u32,
+    pub cpus: f32,
     pub csrf_token: Option<String>,
 }
 
@@ -283,7 +291,15 @@ pub async fn index(
 
     let mut resp = Response::new(());
     let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
-    let mut page = templates::index_page(&user, &instances, &state.config, q.err.as_deref(), &token).into_response();
+    let mut page = templates::index_page(
+        &user,
+        &instances,
+        &state.config,
+        q.err.as_deref(),
+        q.ok.as_deref(),
+        &token,
+    )
+    .into_response();
     for (name, value) in resp.headers().iter() {
         page.headers_mut().insert(name, value.clone());
     }
@@ -389,6 +405,47 @@ pub async fn instance_action(
         tracing::error!("action {form_act} on {name} failed: {e}", form_act = form.act);
     }
     Redirect::to("/").into_response()
+}
+
+pub async fn update_instance_resources(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(name): Path<String>,
+    Form(form): Form<ResourceUpdateForm>,
+) -> Response {
+    if !validate_csrf_token(&jar, form.csrf_token.as_deref()) {
+        return (StatusCode::FORBIDDEN, "CSRF 校验失败").into_response();
+    }
+
+    let (user, kind, _) = match current(&state, &jar).await {
+        Some(v) => v,
+        None => return Redirect::to("/login").into_response(),
+    };
+    if kind == "pending_reset" {
+        return Redirect::to("/change-password").into_response();
+    }
+
+    let instances = docker_ops::list_instances(&state.docker, None)
+        .await
+        .unwrap_or_default();
+    let inst = match instances.iter().find(|i| i.name == name) {
+        Some(i) => i,
+        None => return Redirect::to("/?err=notfound").into_response(),
+    };
+    if user.role != "admin" && inst.owner != user.username {
+        return (StatusCode::FORBIDDEN, "无权限调整该实例资源").into_response();
+    }
+
+    if docker_ops::validate_resource_limits(form.mem, form.cpus).is_err() {
+        return Redirect::to("/?err=resource-range").into_response();
+    }
+
+    if let Err(e) = docker_ops::update_resources(&state.docker, &name, form.mem, form.cpus).await {
+        tracing::error!("update resources for {name} failed: {e}");
+        return Redirect::to("/?err=resource").into_response();
+    }
+
+    Redirect::to("/?ok=resources").into_response()
 }
 
 pub async fn change_password_page(
@@ -783,14 +840,97 @@ mod tests {
                 cookie_domain: None,
             },
             None,
+            None,
             "token-456",
         )
         .into_string();
 
         assert!(html.contains("name=\"csrf_token\""));
         assert!(html.contains("value=\"token-456\""));
-        assert_eq!(html.matches("name=\"csrf_token\"").count(), 3);
+        assert_eq!(html.matches("name=\"csrf_token\"").count(), 4);
         assert!(html.contains("<form method=\"post\" action=\"/logout\">"));
+    }
+
+    #[test]
+    fn instance_card_includes_runtime_resource_update_form() {
+        let html = templates::index_page(
+            &User {
+                id: 7,
+                username: "alice".into(),
+                role: "member".into(),
+                must_change_password: false,
+            },
+            &[docker_ops::InstanceInfo {
+                name: "devbox".into(),
+                state: "running".into(),
+                port: 8200,
+                mem: 1024,
+                cpus: 1.0,
+                owner: "alice".into(),
+            }],
+            &Config {
+                hostname_suffix: "example.com".into(),
+                base_dir: "/tmp".into(),
+                port_min: 8200,
+                port_max: 8299,
+                image: "codercom/code-server:latest".into(),
+                cookie_domain: None,
+            },
+            None,
+            Some("resources"),
+            "token-999",
+        )
+        .into_string();
+
+        assert!(html.contains("/instances/devbox/resources"));
+        assert!(html.contains("资源配置已更新"));
+        assert!(html.contains("无需重启容器"));
+        assert!(html.contains("256–8192 MB"));
+        assert!(html.contains("0.1–8 核"));
+        assert!(html.contains("name=\"mem\""));
+        assert!(html.contains("name=\"cpus\""));
+        assert!(html.contains("value=\"1024\""));
+        assert!(html.contains("value=\"1\""));
+    }
+
+    #[test]
+    fn resource_update_errors_are_explained_in_the_panel() {
+        let user = User {
+            id: 7,
+            username: "alice".into(),
+            role: "member".into(),
+            must_change_password: false,
+        };
+        let config = Config {
+            hostname_suffix: "example.com".into(),
+            base_dir: "/tmp".into(),
+            port_min: 8200,
+            port_max: 8299,
+            image: "codercom/code-server:latest".into(),
+            cookie_domain: None,
+        };
+
+        let range_error = templates::index_page(
+            &user,
+            &[],
+            &config,
+            Some("resource-range"),
+            None,
+            "token",
+        )
+            .into_string();
+        assert!(range_error.contains("内存范围为 256–8192 MB，CPU 范围为 0.1–8 核"));
+
+        let docker_error = templates::index_page(
+            &user,
+            &[],
+            &config,
+            Some("resource"),
+            None,
+            "token",
+        )
+            .into_string();
+        assert!(docker_error.contains("降低内存时，请先确认当前使用量低于目标值"));
     }
 
     #[test]

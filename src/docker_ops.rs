@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bollard::{
     container::{
         Config as ContainerConfig, CreateContainerOptions, ListContainersOptions,
-        RemoveContainerOptions, StartContainerOptions,
+        RemoveContainerOptions, StartContainerOptions, UpdateContainerOptions,
     },
     models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum},
     Docker,
@@ -27,6 +27,31 @@ pub struct CreateSpec<'a> {
     pub port: u16,
     pub base_dir: &'a str,
     pub image: &'a str,
+}
+
+pub const MIN_MEMORY_MB: u32 = 256;
+pub const MAX_MEMORY_MB: u32 = 8192;
+pub const MIN_CPUS: f32 = 0.1;
+pub const MAX_CPUS: f32 = 8.0;
+
+pub fn validate_resource_limits(mem: u32, cpus: f32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (MIN_MEMORY_MB..=MAX_MEMORY_MB).contains(&mem),
+        "memory must be between {MIN_MEMORY_MB} and {MAX_MEMORY_MB} MB"
+    );
+    anyhow::ensure!(
+        cpus.is_finite() && (MIN_CPUS..=MAX_CPUS).contains(&cpus),
+        "CPU limit must be between {MIN_CPUS} and {MAX_CPUS}"
+    );
+    Ok(())
+}
+
+fn resource_update_options(mem: u32, cpus: f32) -> UpdateContainerOptions<String> {
+    UpdateContainerOptions {
+        memory: Some((mem as i64) * 1024 * 1024),
+        nano_cp_us: Some((cpus as f64 * 1_000_000_000.0) as i64),
+        ..Default::default()
+    }
 }
 
 pub async fn list_instances(
@@ -56,12 +81,27 @@ pub async fn list_instances(
             .map(|n| n.trim_start_matches('/').to_string())
             .unwrap_or_default();
         let labels = c.labels.unwrap_or_default();
+        let inspect = docker.inspect_container(&name, None).await.ok();
+        let host_config = inspect.as_ref().and_then(|info| info.host_config.as_ref());
+        let mem = host_config
+            .and_then(|config| config.memory)
+            .filter(|memory| *memory > 0)
+            .map(|memory| (memory / (1024 * 1024)) as u32)
+            .or_else(|| labels.get("cs-mem").and_then(|v| v.parse().ok()))
+            .unwrap_or(1024);
+        let cpus = host_config
+            .and_then(|config| config.nano_cpus)
+            .filter(|nano_cpus| *nano_cpus > 0)
+            .map(|nano_cpus| nano_cpus as f64 / 1_000_000_000.0)
+            .map(|cpus| cpus as f32)
+            .or_else(|| labels.get("cs-cpus").and_then(|v| v.parse().ok()))
+            .unwrap_or(1.0);
         result.push(InstanceInfo {
             name,
             state: c.state.unwrap_or_else(|| "unknown".into()),
             port: labels.get("cs-port").and_then(|v| v.parse().ok()).unwrap_or(0),
-            mem: labels.get("cs-mem").and_then(|v| v.parse().ok()).unwrap_or(1024),
-            cpus: labels.get("cs-cpus").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            mem,
+            cpus,
             owner: labels.get("cs-owner").cloned().unwrap_or_default(),
         });
     }
@@ -146,6 +186,19 @@ pub async fn create_instance(docker: &Docker, spec: CreateSpec<'_>) -> anyhow::R
     Ok(())
 }
 
+pub async fn update_resources(
+    docker: &Docker,
+    name: &str,
+    mem: u32,
+    cpus: f32,
+) -> anyhow::Result<()> {
+    validate_resource_limits(mem, cpus)?;
+    docker
+        .update_container(name, resource_update_options(mem, cpus))
+        .await?;
+    Ok(())
+}
+
 pub async fn start(docker: &Docker, name: &str) -> anyhow::Result<()> {
     docker
         .start_container(name, None::<StartContainerOptions<String>>)
@@ -174,4 +227,32 @@ pub async fn remove(docker: &Docker, name: &str) -> anyhow::Result<()> {
 
 pub fn pick_free_port(used: &HashSet<u16>, min: u16, max: u16) -> Option<u16> {
     (min..=max).find(|p| !used.contains(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_limits_accept_supported_boundaries() {
+        assert!(validate_resource_limits(MIN_MEMORY_MB, MIN_CPUS).is_ok());
+        assert!(validate_resource_limits(MAX_MEMORY_MB, MAX_CPUS).is_ok());
+    }
+
+    #[test]
+    fn resource_limits_reject_out_of_range_values() {
+        assert!(validate_resource_limits(MIN_MEMORY_MB - 1, 1.0).is_err());
+        assert!(validate_resource_limits(MAX_MEMORY_MB + 1, 1.0).is_err());
+        assert!(validate_resource_limits(1024, MIN_CPUS - 0.01).is_err());
+        assert!(validate_resource_limits(1024, MAX_CPUS + 0.1).is_err());
+        assert!(validate_resource_limits(1024, f32::NAN).is_err());
+    }
+
+    #[test]
+    fn resource_update_uses_docker_units() {
+        let options = resource_update_options(2048, 2.5);
+
+        assert_eq!(options.memory, Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(options.nano_cp_us, Some(2_500_000_000));
+    }
 }

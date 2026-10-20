@@ -35,7 +35,10 @@ body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; background
     color: #cf1322;
     border-color: #ffa39e;
 }
+.resource-hint { display: block; margin-top: 6px; color: #666; font-size: 0.85em; }
 form { display: inline; }
+.resource-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.resource-form input, .resource-form select { margin-right: 0; }
 input, select { padding: 6px 8px; margin-right: 8px; border: 1px solid #ccc; border-radius: 5px; }
 .meta { color: #888; font-size: 0.85em; word-break: break-word; }
 .err { color: #cf1322; }
@@ -148,6 +151,7 @@ pub fn index_page(
     instances: &[InstanceInfo],
     config: &Config,
     err: Option<&str>,
+    ok: Option<&str>,
     csrf_token: &str,
 ) -> Markup {
     let err_msg = match err {
@@ -155,12 +159,21 @@ pub fn index_page(
         Some("name") => Some("实例名称无效，只能包含小写字母、数字和连字符"),
         Some("port") => Some("端口范围已耗尽"),
         Some("create") => Some("创建失败，请查看面板日志"),
+        Some("resource-range") => Some("内存范围为 256–8192 MB，CPU 范围为 0.1–8 核。"),
+        Some("resource") => Some("Docker 未能应用新限制。降低内存时，请先确认当前使用量低于目标值。"),
         Some("notfound") => Some("实例不存在"),
+        _ => None,
+    };
+    let ok_msg = match ok {
+        Some("resources") => Some("资源配置已更新，新的限制已应用，无需重启容器。"),
         _ => None,
     };
     layout(Some(user), html! {
         @if let Some(m) = err_msg {
-            div .card .err { (m) }
+            div .card .err role="alert" { (m) }
+        }
+        @if let Some(m) = ok_msg {
+            div .card .ok role="status" { (m) }
         }
         div .card {
             h3 { "创建新实例" }
@@ -189,6 +202,23 @@ pub fn index_page(
                     br;
                     span .meta {
                         "Owner: " (inst.owner) " | 内存: " (inst.mem) "MB | CPU: " (inst.cpus) " | 端口: 127.0.0.1:" (inst.port)
+                    }
+                    br;
+                    form method="post" action={ "/instances/" (inst.name) "/resources" } class="resource-form" {
+                        input type="hidden" name="csrf_token" value=(csrf_token);
+                        label {
+                            "内存 "
+                            input name="mem" type="number" value=(inst.mem) min="256" max="8192" step="256" style="width:90px";
+                            " MB"
+                        }
+                        label {
+                            "CPU "
+                            input name="cpus" type="number" value=(inst.cpus) min="0.1" max="8" step="0.1" style="width:80px";
+                        }
+                        button type="submit" class="btn btn-primary" { "更新资源" }
+                    }
+                    span .resource-hint {
+                        "内存范围：256–8192 MB；CPU 范围：0.1–8 核。限制即时应用，无需重启。"
                     }
                     br;
                     form method="post" action={ "/instances/" (inst.name) "/action" } {

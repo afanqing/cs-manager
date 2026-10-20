@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(handlers::index))
         .route("/instances", post(handlers::create_instance))
         .route("/instances/:name/action", post(handlers::instance_action))
+        .route("/instances/:name/resources", post(handlers::update_instance_resources))
         .route(
             "/change-password",
             get(handlers::change_password_page).post(handlers::change_password_submit),
