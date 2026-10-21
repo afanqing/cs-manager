@@ -737,7 +737,11 @@ docker stats <name> --no-stream
 
 ## 11. 后续改进路线
 
-按优先级排序，每项都标注了改动范围。
+按优先级排序，每项都标注了改动范围。标注 ✅ 的已完成（见对应小节的实现说明）。
+
+- ✅ 11.2 跨用户同名实例（commit `ff02849`）
+- ✅ 11.5 审计日志（commit `ff02849`）
+- ⬜ 11.1 自动拉镜像、11.3 rootless Docker、11.4 邮件邀请、11.6 实例模板、11.7 PWA、11.8 多节点 — 待实现
 
 ### 11.1 P1：创建实例时自动拉镜像
 
@@ -762,7 +766,7 @@ if docker.inspect_image(spec.image).await.is_err() {
 
 `Cargo.toml` 加 `futures-util = "0.3"`。
 
-### 11.2 P1：跨用户同名实例
+### 11.2 P1：跨用户同名实例 ✅ 已完成（commit `ff02849`）
 
 **现状**：容器名和数据目录都是全局唯一。
 
@@ -771,6 +775,8 @@ if docker.inspect_image(spec.image).await.is_err() {
 - 容器名改为 `cs-<owner>-<name>`；
 - 数据目录改为 `instances/<owner>/<name>`；
 - `list_instances`、`auth_verify`、templates 同步调整。
+
+**实现**：`docker_ops::container_name(owner, name)` 生成 `cs-{owner}-{name}`；`create_instance` 使用 `{base_dir}/{owner}/{name}` 数据目录并打 `cs-name` 标签；`list_instances` 优先读取 `cs-name` 标签作为实例名。测试覆盖：`container_name_formats_owner_and_name`、`container_name_supports_same_name_different_owners`。
 
 ### 11.3 P2：rootless Docker
 
@@ -797,13 +803,15 @@ if docker.inspect_image(spec.image).await.is_err() {
 3. 加 SMTP 发送逻辑（`lettre` crate）；
 4. 加 `/register/<token>` 路由，用户自设密码。
 
-### 11.5 P2：审计日志
+### 11.5 P2：审计日志 ✅ 已完成（commit `ff02849`）
 
 **改动**：
 
 1. 加 `audit_log` 表：`id, user_id, action, target, detail, created_at`；
 2. 在创建/启停/删/改密/登录处插入记录；
 3. admin 页加"审计日志"入口。
+
+**实现**：`db::init` 创建 `audit_log` 表；`auth::insert_audit_log` / `list_audit_logs` 提供 CRUD；`handlers` 在 login、create_instance、instance_action、update_resources、change_password、admin_create_user、admin_reset_password、admin_delete_user 处插入记录；`/admin/audit-logs` 路由 + `templates::admin_audit_logs_page` 渲染页面。测试覆盖：`insert_and_list_audit_logs`、`list_audit_logs_respects_limit`、`list_audit_logs_empty`、`audit_log_optional_fields`、`audit_log_includes_username_via_join`、`audit_logs_page_renders_table_with_data`、`audit_logs_page_renders_empty_table`。
 
 ### 11.6 P3：实例模板
 
