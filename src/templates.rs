@@ -101,6 +101,8 @@ pub fn layout(user: Option<&User>, body: Markup, csrf_token: &str) -> Markup {
                                 " | "
                                 a href="/admin/users" { "用户管理" }
                                 " | "
+                                a href="/admin/audit-logs" { "审计日志" }
+                                " | "
                                 form method="post" action="/logout" {
                                     input type="hidden" name="csrf_token" value=(csrf_token);
                                     button type="submit" class="btn" { "退出" }
@@ -289,4 +291,120 @@ pub fn admin_users_page(
             }
         }
     }, csrf_token)
+}
+
+pub fn admin_audit_logs_page(
+    user: &User,
+    logs: &[(i64, String, String, Option<String>, Option<String>, String)],
+    csrf_token: &str,
+) -> Markup {
+    layout(Some(user), html! {
+        h3 { "审计日志" }
+        div .table-wrap {
+            table {
+                thead {
+                    tr {
+                        th { "ID" }
+                        th { "用户" }
+                        th { "操作" }
+                        th { "目标" }
+                        th { "详情" }
+                        th { "时间" }
+                    }
+                }
+                tbody {
+                    @for (id, username, action, target, detail, created_at) in logs {
+                        tr {
+                            td { (id) }
+                            td { (username) }
+                            td { (action) }
+                            td {
+                                @if let Some(t) = target {
+                                    (t)
+                                } @else {
+                                    "-"
+                                }
+                            }
+                            td {
+                                @if let Some(d) = detail {
+                                    (d)
+                                } @else {
+                                    "-"
+                                }
+                            }
+                            td { (created_at) }
+                        }
+                    }
+                }
+            }
+        }
+    }, csrf_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_logs_page_renders_table_with_data() {
+        let user = User {
+            id: 1,
+            username: "admin".into(),
+            role: "admin".into(),
+            must_change_password: false,
+        };
+        let logs = vec![
+            (
+                5i64,
+                "admin".to_string(),
+                "create_instance".to_string(),
+                Some("devbox".to_string()),
+                Some("mem=1024MB cpus=2 port=8200".to_string()),
+                "2026-10-21 10:00:00".to_string(),
+            ),
+            (
+                4i64,
+                "bob".to_string(),
+                "login".to_string(),
+                Some("bob".to_string()),
+                None,
+                "2026-10-21 09:30:00".to_string(),
+            ),
+        ];
+        let html = admin_audit_logs_page(&user, &logs, "token-abc").into_string();
+
+        assert!(html.contains("审计日志"));
+        assert!(html.contains("<table"));
+        assert!(html.contains("admin"));
+        assert!(html.contains("bob"));
+        assert!(html.contains("create_instance"));
+        assert!(html.contains("login"));
+        assert!(html.contains("devbox"));
+        assert!(html.contains("mem=1024MB cpus=2 port=8200"));
+        assert!(html.contains("2026-10-21 10:00:00"));
+        assert!(html.contains("2026-10-21 09:30:00"));
+        assert!(html.contains("name=\"csrf_token\""));
+        assert!(html.contains("value=\"token-abc\""));
+    }
+
+    #[test]
+    fn audit_logs_page_renders_empty_table() {
+        let user = User {
+            id: 1,
+            username: "admin".into(),
+            role: "admin".into(),
+            must_change_password: false,
+        };
+        let logs: Vec<(i64, String, String, Option<String>, Option<String>, String)> = vec![];
+        let html = admin_audit_logs_page(&user, &logs, "token-xyz").into_string();
+
+        assert!(html.contains("审计日志"));
+        assert!(html.contains("<table"));
+        let tbody_start = html.find("<tbody>").unwrap();
+        let tbody_end = html.find("</tbody>").unwrap();
+        let tbody_content = &html[tbody_start..tbody_end];
+        let tr_count = tbody_content.matches("<tr>").count();
+        assert_eq!(tr_count, 0);
+        assert!(html.contains("value=\"token-xyz\""));
+    }
 }

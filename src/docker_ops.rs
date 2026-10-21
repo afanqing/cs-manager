@@ -74,14 +74,19 @@ pub async fn list_instances(
     let containers = docker.list_containers(Some(opts)).await?;
     let mut result = Vec::new();
     for c in containers {
-        let name = c
+        let container_name = c
             .names
             .unwrap_or_default()
             .first()
             .map(|n| n.trim_start_matches('/').to_string())
             .unwrap_or_default();
         let labels = c.labels.unwrap_or_default();
-        let inspect = docker.inspect_container(&name, None).await.ok();
+        // 优先使用 cs-name 标签作为实例名（支持跨用户同名实例）
+        let name = labels
+            .get("cs-name")
+            .cloned()
+            .unwrap_or_else(|| container_name.clone());
+        let inspect = docker.inspect_container(&container_name, None).await.ok();
         let host_config = inspect.as_ref().and_then(|info| info.host_config.as_ref());
         let mem = host_config
             .and_then(|config| config.memory)
@@ -108,8 +113,16 @@ pub async fn list_instances(
     Ok(result)
 }
 
+/// 根据 owner 和 instance name 生成容器名（支持跨用户同名实例）
+pub fn container_name(owner: &str, name: &str) -> String {
+    format!("cs-{}-{}", owner, name)
+}
+
 pub async fn create_instance(docker: &Docker, spec: CreateSpec<'_>) -> anyhow::Result<()> {
-    let data_dir = format!("{}/{}", spec.base_dir, spec.name);
+    let cname = container_name(spec.owner, spec.name);
+    let data_dir = format!("{}/{}/{}", spec.base_dir, spec.owner, spec.name);
+
+    // 创建数据目录
     std::fs::create_dir_all(&data_dir)?;
 
     // git clone + chown 放到 blocking 线程
@@ -137,6 +150,7 @@ pub async fn create_instance(docker: &Docker, spec: CreateSpec<'_>) -> anyhow::R
     labels.insert("cs-mem".to_string(), spec.mem.to_string());
     labels.insert("cs-cpus".to_string(), spec.cpus.to_string());
     labels.insert("cs-port".to_string(), spec.port.to_string());
+    labels.insert("cs-name".to_string(), spec.name.to_string());
 
     let mut port_bindings = HashMap::new();
     port_bindings.insert(
@@ -174,14 +188,14 @@ pub async fn create_instance(docker: &Docker, spec: CreateSpec<'_>) -> anyhow::R
         ..Default::default()
     };
 
-    let opts = CreateContainerOptions {
-        name: spec.name,
+    let opts = CreateContainerOptions::<String> {
+        name: cname.clone(),
         ..Default::default()
     };
 
     docker.create_container(Some(opts), config).await?;
     docker
-        .start_container(spec.name, None::<StartContainerOptions<String>>)
+        .start_container(&cname, None::<StartContainerOptions<String>>)
         .await?;
     Ok(())
 }
@@ -254,5 +268,20 @@ mod tests {
 
         assert_eq!(options.memory, Some(2 * 1024 * 1024 * 1024));
         assert_eq!(options.nano_cp_us, Some(2_500_000_000));
+    }
+
+    #[test]
+    fn container_name_formats_owner_and_name() {
+        assert_eq!(container_name("alice", "devbox"), "cs-alice-devbox");
+        assert_eq!(container_name("bob", "my-project"), "cs-bob-my-project");
+    }
+
+    #[test]
+    fn container_name_supports_same_name_different_owners() {
+        let a = container_name("alice", "web");
+        let b = container_name("bob", "web");
+        assert_ne!(a, b);
+        assert_eq!(a, "cs-alice-web");
+        assert_eq!(b, "cs-bob-web");
     }
 }

@@ -238,6 +238,8 @@ pub async fn login_submit(
         Ok(t) => t,
         Err(_) => return Redirect::to("/login?err=2").into_response(),
     };
+    // 审计日志：登录成功
+    let _ = auth::insert_audit_log(&db, id, "login", Some(form.username.trim()), None);
     drop(db);
 
     let mut resp = if kind == "pending_reset" {
@@ -330,7 +332,9 @@ pub async fn create_instance(
     let mem = form.mem.clamp(256, 8192);
     let cpus = form.cpus.clamp(0.1, 8.0);
 
-    if state.docker.inspect_container(&name, None).await.is_ok() {
+    // 使用 container_name 检查是否已存在（支持跨用户同名实例）
+    let cname = docker_ops::container_name(&user.username, &name);
+    if state.docker.inspect_container(&cname, None).await.is_ok() {
         return Redirect::to("/?err=exists").into_response();
     }
 
@@ -363,6 +367,16 @@ pub async fn create_instance(
         tracing::error!("create instance failed: {e}");
         return Redirect::to("/?err=create").into_response();
     }
+
+    // 审计日志：创建实例
+    {
+        let db = state.db.lock().await;
+        let _ = auth::insert_audit_log(
+            &db, user.id, "create_instance", Some(&name),
+            Some(&format!("mem={}MB cpus={} port={}", mem, cpus, port)),
+        );
+    }
+
     Redirect::to("/").into_response()
 }
 
@@ -395,15 +409,28 @@ pub async fn instance_action(
         return (StatusCode::FORBIDDEN, "无权限操作该实例").into_response();
     }
 
-    let res = match form.act.as_str() {
-        "start" => docker_ops::start(&state.docker, &name).await,
-        "stop" => docker_ops::stop(&state.docker, &name).await,
-        "remove" => docker_ops::remove(&state.docker, &name).await,
+    // 使用 container_name 获取实际容器名（支持跨用户同名实例）
+    let cname = docker_ops::container_name(&inst.owner, &name);
+    let act = form.act.as_str();
+    let res = match act {
+        "start" => docker_ops::start(&state.docker, &cname).await,
+        "stop" => docker_ops::stop(&state.docker, &cname).await,
+        "remove" => docker_ops::remove(&state.docker, &cname).await,
         _ => Ok(()),
     };
     if let Err(e) = res {
-        tracing::error!("action {form_act} on {name} failed: {e}", form_act = form.act);
+        tracing::error!("action {act} on {cname} failed: {e}");
     }
+
+    // 审计日志：启停/删除实例
+    {
+        let db = state.db.lock().await;
+        let _ = auth::insert_audit_log(
+            &db, user.id, act, Some(&name),
+            Some(&format!("owner={}", inst.owner)),
+        );
+    }
+
     Redirect::to("/").into_response()
 }
 
@@ -440,9 +467,20 @@ pub async fn update_instance_resources(
         return Redirect::to("/?err=resource-range").into_response();
     }
 
-    if let Err(e) = docker_ops::update_resources(&state.docker, &name, form.mem, form.cpus).await {
-        tracing::error!("update resources for {name} failed: {e}");
+    // 使用 container_name 获取实际容器名（支持跨用户同名实例）
+    let cname = docker_ops::container_name(&inst.owner, &name);
+    if let Err(e) = docker_ops::update_resources(&state.docker, &cname, form.mem, form.cpus).await {
+        tracing::error!("update resources for {cname} failed: {e}");
         return Redirect::to("/?err=resource").into_response();
+    }
+
+    // 审计日志：更新资源
+    {
+        let db = state.db.lock().await;
+        let _ = auth::insert_audit_log(
+            &db, user.id, "update_resources", Some(&name),
+            Some(&format!("mem={}MB cpus={}", form.mem, form.cpus)),
+        );
     }
 
     Redirect::to("/?ok=resources").into_response()
@@ -518,6 +556,8 @@ pub async fn change_password_submit(
     );
     let _ = auth::delete_user_sessions(&db, user.id);
     let new_token = auth::create_session(&db, user.id, "full").ok();
+    // 审计日志：修改密码
+    let _ = auth::insert_audit_log(&db, user.id, "change_password", None, None);
     drop(db);
 
     let token = match new_token {
@@ -595,6 +635,12 @@ pub async fn admin_create_user(
          VALUES (?1, ?2, ?3, 1, unixepoch())",
         params![username, hash, role],
     );
+    // 审计日志：创建用户
+    if res.is_ok() {
+        let _ = auth::insert_audit_log(
+            &db, user.id, "create_user", Some(&username), Some(&format!("role={}", role)),
+        );
+    }
     drop(db);
 
     match res {
@@ -650,6 +696,10 @@ pub async fn admin_reset_password(
         params![hash, id],
     );
     let _ = auth::delete_user_sessions(&db, id);
+    // 审计日志：重置密码
+    let _ = auth::insert_audit_log(
+        &db, user.id, "reset_password", Some(&id.to_string()), None,
+    );
     drop(db);
 
     let msg = format!(
@@ -783,6 +833,12 @@ pub async fn admin_delete_user(
 
     let db = state.db.lock().await;
     let res = db.execute("DELETE FROM users WHERE id = ?1", params![id]);
+    // 审计日志：删除用户
+    if res.is_ok() {
+        let _ = auth::insert_audit_log(
+            &db, user.id, "delete_user", Some(&username), None,
+        );
+    }
     drop(db);
 
     let msg = match res {
@@ -793,6 +849,31 @@ pub async fn admin_delete_user(
     let mut resp = Response::new(());
     let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
     let mut page = templates::admin_users_page(&user, &users, Some(&msg), &token).into_response();
+    for (name, value) in resp.headers().iter() {
+        page.headers_mut().insert(name, value.clone());
+    }
+    page
+}
+
+pub async fn admin_audit_logs_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let (user, kind, _) = match current(&state, &jar).await {
+        Some(v) => v,
+        None => return Redirect::to("/login").into_response(),
+    };
+    if kind == "pending_reset" {
+        return Redirect::to("/change-password").into_response();
+    }
+    if user.role != "admin" {
+        return (StatusCode::FORBIDDEN, "仅管理员可访问").into_response();
+    }
+
+    let db = state.db.lock().await;
+    let logs = auth::list_audit_logs(&db, 200).unwrap_or_default();
+    drop(db);
+
+    let mut resp = Response::new(());
+    let token = get_or_create_csrf_token(&mut resp, &jar, state.config.cookie_domain.as_deref());
+    let mut page = templates::admin_audit_logs_page(&user, &logs, &token).into_response();
     for (name, value) in resp.headers().iter() {
         page.headers_mut().insert(name, value.clone());
     }

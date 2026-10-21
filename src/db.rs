@@ -29,6 +29,16 @@ pub fn init(path: &str) -> Result<Connection> {
          );
 
          CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+         -- 创建 audit_log 表
+         CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            target TEXT,
+            detail TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+         );
         ",
     )?;
     Ok(conn)

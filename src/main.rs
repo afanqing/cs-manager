@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/users/:id/reset", post(handlers::admin_reset_password))
         .route("/admin/users/:id/delete", post(handlers::admin_delete_user))
+        .route("/admin/audit-logs", get(handlers::admin_audit_logs_page))
         .route("/api/auth/verify", get(handlers::auth_verify))
         .with_state(state);
 
