@@ -6,12 +6,11 @@
 
 ## 当前代码状态
 
-- 分支：`feature/csrf-protection`
-- 最新功能：审计日志系统 + 跨用户同名实例支持
-- 资源功能提交：`3cf34a3`，容器资源运行时调整与面板反馈；已推送到 `origin/feature/csrf-protection`
-- 前序提交：`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
-- 工作区状态：已实现审计日志和跨用户同名实例功能，待提交
-- 验证：`cargo test --quiet -- --test-threads=1`，8 个测试通过
+- 分支：`feature/ux-resource-feedback`（本地领先 `origin/feature/csrf-protection` 3 个提交，尚未推送）
+- 最新提交：`ff02849` — 审计日志系统 + 跨用户同名实例支持（含 9 个新测试）
+- 前序提交：`6069dba`（响应式 toast 反馈与移动端资源表单）、`3cf34a3`（容器资源运行时调整，已推送到 `origin/feature/csrf-protection`）、`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
+- 工作区状态：干净；本地 HEAD `ff02849` 未推送到远程
+- 验证：`cargo test --quiet -- --test-threads=1`，17 个测试通过（原 8 + 审计日志/跨用户实例 9）
 - 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交 `3cf34a3` 尚未确认。上线后需在实例卡片确认“更新资源”及成功/失败提示已出现
 - 开发环境提示：若 Cargo 编译异常缓慢，先检查并清理遗留的 `cargo` / `rustc` 进程；本环境使用 `CARGO_BUILD_JOBS=2` 可避免并发过高
 
