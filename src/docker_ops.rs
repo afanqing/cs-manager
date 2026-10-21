@@ -407,4 +407,52 @@ mod tests {
             Some(expected.as_str())
         );
     }
+
+    #[test]
+    fn pick_free_port_finds_first_available() {
+        let mut used = HashSet::new();
+        used.insert(8200);
+        used.insert(8202);
+        used.insert(8205);
+
+        // 应该找到第一个空闲端口 8201
+        assert_eq!(pick_free_port(&used, 8200, 8299), Some(8201));
+
+        // 添加 8201 后，应该找到 8203
+        used.insert(8201);
+        assert_eq!(pick_free_port(&used, 8200, 8299), Some(8203));
+    }
+
+    #[test]
+    fn pick_free_port_returns_none_when_exhausted() {
+        // 填满所有端口
+        let used: HashSet<u16> = (8200..=8299).collect();
+        assert_eq!(pick_free_port(&used, 8200, 8299), None);
+    }
+
+    #[test]
+    fn pick_free_port_respects_custom_range() {
+        let used = HashSet::new();
+        // 自定义范围 9000-9009
+        assert_eq!(pick_free_port(&used, 9000, 9009), Some(9000));
+        
+        let mut used = HashSet::new();
+        used.insert(9000);
+        used.insert(9001);
+        assert_eq!(pick_free_port(&used, 9000, 9009), Some(9002));
+    }
+
+    #[test]
+    fn container_name_supports_underscores_in_owner() {
+        // 用户名可以包含下划线
+        assert_eq!(container_name("foo_bar", "web"), "cs-foo_bar-web");
+        assert_eq!(container_name("team_lead", "dev"), "cs-team_lead-dev");
+    }
+
+    #[test]
+    fn container_name_handles_complex_names() {
+        // 复杂的 owner 和 name 组合
+        assert_eq!(container_name("alice-test", "my-project"), "cs-alice-test-my-project");
+        assert_eq!(container_name("user_123", "app-v2"), "cs-user_123-app-v2");
+    }
 }

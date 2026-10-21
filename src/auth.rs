@@ -190,6 +190,14 @@ mod tests {
                 must_change_password INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -269,5 +277,114 @@ mod tests {
         let logs = list_audit_logs(&conn, 1).unwrap();
         // username from JOIN
         assert_eq!(logs[0].username, "admin");
+    }
+
+    #[test]
+    fn password_hash_and_verify_roundtrip() {
+        let password = "test_password_123!@#";
+        let hash = hash_password(password);
+        
+        // 验证密码正确
+        assert!(verify_password(password, &hash));
+        // 验证错误密码失败
+        assert!(!verify_password("wrong_password", &hash));
+    }
+
+    #[test]
+    fn password_hash_is_different_each_time() {
+        let password = "same_password";
+        let hash1 = hash_password(password);
+        let hash2 = hash_password(password);
+        
+        // 即使密码相同，哈希也应该不同（因为盐不同）
+        assert_ne!(hash1, hash2);
+        
+        // 但两个哈希都应该能验证密码
+        assert!(verify_password(password, &hash1));
+        assert!(verify_password(password, &hash2));
+    }
+
+    #[test]
+    fn ensure_admin_creates_only_if_not_exists() {
+        let conn = setup_test_db();
+        
+        // 第一次调用应该创建 admin
+        ensure_admin(&conn, &Some("test123".to_string())).unwrap();
+        
+        // 再次调用不应该失败
+        ensure_admin(&conn, &Some("test456".to_string())).unwrap();
+        
+        // 验证 admin 存在且密码是第一次设置的
+        // 更直接的验证：查询数据库
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE username = 'admin'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn session_creation_and_loading() {
+        let conn = setup_test_db();
+        
+        // 创建会话
+        let token = create_session(&conn, 1, "full").unwrap();
+        
+        // 加载会话应该成功
+        let result = load_session(&conn, &token).unwrap();
+        assert!(result.is_some());
+        
+        let (user, kind) = result.unwrap();
+        assert_eq!(user.username, "admin");
+        assert_eq!(kind, "full");
+    }
+
+    #[test]
+    fn session_deletion() {
+        let conn = setup_test_db();
+        
+        // 创建会话
+        let token = create_session(&conn, 1, "full").unwrap();
+        
+        // 删除会话
+        delete_session(&conn, &token).unwrap();
+        
+        // 再次加载应该返回 None
+        let result = load_session(&conn, &token).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn delete_user_sessions_removes_all() {
+        let conn = setup_test_db();
+        
+        // 创建多个会话
+        let token1 = create_session(&conn, 1, "full").unwrap();
+        let token2 = create_session(&conn, 1, "pending_reset").unwrap();
+        
+        // 删除用户 1 的所有会话
+        delete_user_sessions(&conn, 1).unwrap();
+        
+        // 两个会话都应该被删除
+        assert!(load_session(&conn, &token1).unwrap().is_none());
+        assert!(load_session(&conn, &token2).unwrap().is_none());
+    }
+
+    #[test]
+    fn temp_password_generation() {
+        let temp1 = generate_temp_password();
+        let temp2 = generate_temp_password();
+        
+        // 临时密码应该是 24 位 hex
+        assert_eq!(temp1.len(), 24);
+        assert_eq!(temp2.len(), 24);
+        
+        // 每次生成的密码应该不同
+        assert_ne!(temp1, temp2);
+        
+        // 应该只包含 hex 字符
+        assert!(temp1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(temp2.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

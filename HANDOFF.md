@@ -7,13 +7,14 @@
 ## 当前代码状态
 
 - 分支：`feature/csrf-protection`
-- 最新提交：（本地未提交）镜像模板管理功能实现（合并 §11.1 + §11.6）
-- 前序提交：`7aaa157`（跨用户同名实例路由修复）、`e8ff28e`（Nginx 迁移指南初稿）、`306cf60`（handlers 拆分子模块重构）、`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
-- 工作区状态：包含镜像模板管理功能，待提交
-- 验证：`cargo test --quiet -- --test-threads=1`，**27 个测试通过**（21 个基线 + 6 个新增镜像管理测试）
-- 编译状态：`cargo check` 零错误；1 个未使用结构体警告（`ImageActionForm`）
+- 最新提交：（本地未提交）代码质量提升（清理警告 + 增强测试 + CI 配置）
+- 前序提交：`eb14aa5`（镜像模板管理功能实现）、`7aaa157`（跨用户同名实例路由修复）、`e8ff28e`（Nginx 迁移指南初稿）、`306cf60`（handlers 拆分子模块重构）、`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
+- 工作区状态：包含代码质量改进，待提交
+- 验证：`cargo test --quiet -- --test-threads=1`，**39 个测试通过**（27 个基线 + 12 个新增）
+- 编译状态：`cargo check` 零错误、零警告；`cargo clippy --all-targets` 零警告
 - Nginx 配置：见 §13.1（基于生产实际配置），**需要手动更新正则字符集**（见 §13.1.2）
 - 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交尚未确认。上线后需在实例卡片确认"更新资源"及成功/失败提示已出现
+- CI 配置：`.github/workflows/ci.yml` 已启用，自动运行 clippy 和测试
 
 ---
 
@@ -1098,6 +1099,40 @@ POST /admin/images/:id/pull     → 预拉取镜像到本地（后台异步）
 **背景**：代码复查发现 `handlers.rs` 单文件近 900 行、CSRF/Cookie 逻辑在十余个 handler 中重复、`auth_verify` 未用 `container_name()` 解析容器名、审计日志用裸 6-tuple 传递。
 
 **改动**：分三个阶段，阶段一（紧急修复）与阶段二（结构优化）已完成，详见 §4.2。阶段三（可选，未做）：为 `docker_ops` 与 `auth` 补充集成测试、引入 `cargo clippy` 到 CI。
+
+#### 阶段三：代码质量提升 ✅ 已完成（2026-10-21）
+
+**改进内容**：
+
+1. **清理未使用代码**
+   - 删除 `ImageActionForm` 结构体（定义了但从未使用）
+   - 消除编译警告
+
+2. **增强单元测试覆盖**
+   - `docker_ops.rs`: 新增 5 个测试用例
+     - `pick_free_port_finds_first_available` - 验证端口分配逻辑
+     - `pick_free_port_returns_none_when_exhausted` - 验证端口耗尽处理
+     - `pick_free_port_respects_custom_range` - 验证自定义端口范围
+     - `container_name_supports_underscores_in_owner` - 验证下划线用户名支持
+     - `container_name_handles_complex_names` - 验证复杂名称组合
+   - `auth.rs`: 新增 7 个测试用例
+     - `password_hash_and_verify_roundtrip` - 密码哈希/验证往返测试
+     - `password_hash_is_different_each_time` - 验证盐值随机性
+     - `ensure_admin_creates_only_if_not_exists` - 验证 admin 初始化幂等性
+     - `session_creation_and_loading` - 会话创建和加载测试
+     - `session_deletion` - 会话删除测试
+     - `delete_user_sessions_removes_all` - 批量删除用户会话测试
+     - `temp_password_generation` - 临时密码生成测试
+
+3. **配置 CI 自动化检查**
+   - 创建 `.github/workflows/ci.yml`
+   - 集成 `cargo clippy --all-targets -- -D warnings`
+   - 自动运行所有测试
+   - 支持 push 和 pull_request 触发
+
+**测试覆盖率**：现有 27 个基线测试 + 12 个新增测试 = **39 个测试全部通过**
+
+**CI 配置位置**：`.github/workflows/ci.yml`
 
 ### 11.10 P1：跨用户同名实例路由修复 ✅ 已完成（见 §4.3）
 

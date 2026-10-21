@@ -97,12 +97,6 @@ pub struct ImageForm {
     pub csrf_token: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct ImageActionForm {
-    pub act: String,
-    pub csrf_token: Option<String>,
-}
-
 /// 从 Cookie 中加载当前登录用户及其会话类型。
 ///
 /// 返回 `(User, kind, token)`，其中 `kind` 是 `"full"` 或 `"pending_reset"`。
