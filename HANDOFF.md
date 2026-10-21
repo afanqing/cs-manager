@@ -6,13 +6,13 @@
 
 ## 当前代码状态
 
-- 分支：`feature/csrf-protection`（本地领先 `origin/feature/csrf-protection` 3 个提交，尚未推送）
-- 最新提交：`f25756e` — 修正交接文档信息；`ff02849` — 审计日志系统 + 跨用户同名实例支持（含 9 个新测试）
-- 前序提交：`6069dba`（响应式 toast 反馈与移动端资源表单）、`3cf34a3`（容器资源运行时调整，已推送到 `origin/feature/csrf-protection`）、`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
-- 工作区状态：干净；本地 HEAD `ff02849` 未推送到远程
-- 验证：`cargo test --quiet -- --test-threads=1`，17 个测试通过（原 8 + 审计日志/跨用户实例 9）
-- 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交 `3cf34a3` 尚未确认。上线后需在实例卡片确认“更新资源”及成功/失败提示已出现
-- 开发环境提示：若 Cargo 编译异常缓慢，先检查并清理遗留的 `cargo` / `rustc` 进程；本环境使用 `CARGO_BUILD_JOBS=2` 可避免并发过高
+- 分支：`feature/csrf-protection`
+- 最新提交：`8c5a98a` — 代码结构重构（阶段一修复 + 阶段二优化，见 §4.2）；`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
+- 前序提交：`6069dba`（响应式 toast 反馈与移动端资源表单）、`3cf34a3`（容器资源运行时调整）、`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
+- 工作区状态：干净；`8c5a98a` 尚未推送到 `origin/feature/csrf-protection`
+- 验证：`cargo test --quiet -- --test-threads=1`，14 个测试通过（重构后合并重复测试）
+- 编译状态：`cargo check` 零警告零错误
+- 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交 `3cf34a3` 尚未确认。上线后需在实例卡片确认"更新资源"及成功/失败提示已出现
 
 ---
 
@@ -107,7 +107,7 @@ Nginx 匹配 ~^cs-(?<inst>[a-z0-9-]+).afanai.top$
 a. 从 Cookie 读 cs_session
 b. 查 SQLite sessions 表，校验未过期
 c. 查 users 表，确认 must_change_password=0
-d. inspect_container(test1)，读 label cs-owner、cs-port
+d. container_name(当前用户, test1) → inspect cs-<owner>-test1，读 label cs-owner、cs-port
 e. 校验当前用户是 owner 或 admin
 f. 返回 204 + X-CS-Port: 8200
 
@@ -173,14 +173,19 @@ code-server 返回 IDE 界面
 ├── src/
 │   ├── main.rs         # 入口：配置加载、路由注册、启动监听
 │   ├── db.rs           # SQLite 初始化、建表、WAL 配置
-│   ├── auth.rs         # argon2 哈希、会话 CRUD、admin 初始化
+│   ├── auth.rs         # argon2 哈希、会话 CRUD、审计日志、admin 初始化
 │   ├── docker_ops.rs   # Bollard 封装：列表/创建/启停/删/端口分配
-│   ├── handlers.rs     # 所有 HTTP handler + 鉴权端点
-│   └── templates.rs    # maud 模板：登录/首页/改密/用户管理
+│   ├── handlers/       # HTTP handler 子模块（重构后拆分）
+│   │   ├── mod.rs          # 公共工具：CSRF、Cookie、current、require_user、render_with_csrf
+│   │   ├── auth_handlers.rs # 登录/退出/改密
+│   │   ├── instance.rs     # 首页/创建实例/启停删/资源更新
+│   │   ├── admin.rs        # 用户管理/审计日志页面
+│   │   └── auth_verify.rs  # Nginx auth_request 鉴权端点
+│   └── templates.rs    # maud 模板：登录/首页/改密/用户管理/审计日志
 ├── data/
 │   └── data.db         # SQLite 数据库（用户、会话）
 ├── instances/
-│   └── <实例名>/        # 每个实例的数据目录
+│   └── <owner>/<name>/  # 每个实例的数据目录（按 owner 分目录，支持跨用户同名）
 │       └── project/    # git clone 的项目（可选）
 └── target/release/
     └── cs-manager      # 编译产物（2.8 MB）
@@ -203,6 +208,7 @@ code-server 返回 IDE 界面
 - `ensure_admin`：仅当无 admin 时创建
 - `create_session` / `load_session` / `delete_session` / `delete_user_sessions`
 - `generate_temp_password`：24 位 hex
+- `insert_audit_log` / `list_audit_logs`：审计日志写入与查询，返回 `Vec<AuditLogEntry>`
 
 **`docker_ops.rs`**
 - `list_instances`：按 label 过滤，可加 owner 条件
@@ -212,22 +218,74 @@ code-server 返回 IDE 界面
 - `start` / `stop` / `remove`
 - `pick_free_port`：从 8200–8299 找空闲
 
-**`handlers.rs`**
+**`handlers/mod.rs`**（公共工具层）
+- `generate_csrf_token` / `get_or_create_csrf_token` / `validate_csrf_token`：CSRF 生成与校验
+- `session_cookie` / `clear_cookie` / `set_cookie_header` / `make_session_cookie` / `make_clear_cookie`：Cookie 操作
+- `current()` / `load_users()`：会话查询与用户列表
+- `require_csrf()` / `require_user()` / `render_with_csrf()` / `copy_csrf_cookie()`：可复用中间件式辅助函数
+- `sanitize_name()`：实例名清洗
+
+**`handlers/auth_handlers.rs`**
 - `login_page` / `login_submit` / `logout`
-- 登录、改密、实例操作和用户管理等 POST handler 校验 CSRF token；退出使用 POST
+- `change_password_page` / `change_password_submit` / `render_change_password_with_error`
+- 所有 POST handler 通过 `require_csrf()` 校验 CSRF
+
+**`handlers/instance.rs`**
 - `index`：按角色过滤实例，显示错误
 - `create_instance`：查重 → 分配端口 → 调 docker_ops
-- `update_instance_resources`：CSRF、登录状态、实例归属和数值校验后更新资源；成功/失败通过首页 query 状态反馈
+- `update_instance_resources`：CSRF、登录状态、实例归属和数值校验后更新资源
 - `instance_action`：启停删，校验归属
-- `change_password_page` / `change_password_submit`
-- `admin_users_page` / `admin_create_user` / `admin_reset_password`
-- `auth_verify`：**Nginx auth_request 的核心端点**
+
+**`handlers/admin.rs`**
+- `admin_users_page` / `admin_create_user` / `admin_reset_password` / `admin_delete_user`
+- `admin_audit_logs_page`：审计日志页面
+
+**`handlers/auth_verify.rs`**
+- **Nginx auth_request 的核心端点**
+- 通过 `docker_ops::container_name()` 正确解析跨用户同名实例的容器名
 
 **`templates.rs`**
 - `layout`：公共外壳（顶栏、样式）
-- `login_page` / `change_password_page` / `index_page` / `admin_users_page`
+- `login_page` / `change_password_page` / `index_page` / `admin_users_page` / `admin_audit_logs_page`
 - 首页实例卡片：当前内存/CPU、资源编辑表单、成功/错误状态提示
 - 实例卡片"打开"链接生成 `https://cs-<name>.<domain>/`
+
+---
+
+## 4.2 代码重构记录（Phase 1 + Phase 2）
+
+> 2026-10-21 完成，分支 `feature/csrf-protection`，基线提交 `4b280cc`
+
+### 4.2.1 Phase 1：紧急修复
+
+| 问题 | 修复 |
+|---|---|
+| `auth_verify` 用原始 `q.instance` 作为容器名 | 改为 `docker_ops::container_name()`。容器实际名是 `cs-<owner>-<name>`，旧代码 `inspect_container("test1")` 必然失败导致鉴权 404；修复后同一 hostname 会按访问者身份解析到各自的容器 |
+| `set_cookie_header` 重复定义 | 删除重复，保留 `pub fn` |
+| `render_change_password_with_error` 重复定义 | 删除重复 |
+| 缺少 `OptionalExtension` trait | 在 `auth_handlers.rs`、`admin.rs` 中补充 `use` |
+| 未使用的 import | 清理 `params`、`OptionalExtension`、`StatusCode` |
+
+### 4.2.2 Phase 2：结构优化
+
+| 变更 | 说明 |
+|---|---|
+| `handlers.rs` → `handlers/` 子模块 | 拆分为 `mod.rs`、`auth_handlers.rs`、`instance.rs`、`admin.rs`、`auth_verify.rs` |
+| 提取 CSRF/Cookie 工具函数 | `require_csrf()`、`require_user()`、`render_with_csrf()`、`copy_csrf_cookie()` 等 |
+| `AuditLogEntry` struct | 替代 `auth.rs` 中的 6-tuple，`list_audit_logs` 返回 `Vec<AuditLogEntry>` |
+| 公共 struct 添加文档注释 | `AppState`、`Config`、`InstanceInfo`、`CreateSpec`、`AuditLogEntry` |
+| 常量添加文档注释 | `MIN_MEMORY_MB`、`MAX_MEMORY_MB`、`MIN_CPUS`、`MAX_CPUS` |
+
+### 4.2.3 验证结果
+
+- `cargo check`：0 警告，0 错误
+- `cargo test --quiet -- --test-threads=1`：14 个测试全部通过
+
+### 4.2.4 遗留事项（下一阶段）
+
+- **跨用户同名实例的 hostname 仍会冲突**：`templates.rs` 与 Nginx 都用 `cs-<name>.<domain>`，未包含 owner；而容器名是 `cs-<owner>-<name>`。因此两个用户各建一个 `test1` 时，`auth_verify` 会按访问者身份解析到各自容器，但 Nginx 的 `server_name` 只能匹配一个，且卡片"打开"链接相同。需改为 `cs-<owner>-<name>.<domain>` 并同步 Nginx 正则与模板，属于独立改动（涉及线上 Nginx 配置），本次未做。
+- `auth_verify` 的修复未覆盖集成测试（当前测试均为单元测试，不启动 HTTP 服务）。
+- `instance_action` / `update_instance_resources` 用 `list_instances()` 全量列举来定位实例，实例多时代价较高，可改为直接 `container_name()` + `inspect`。
 
 ---
 
@@ -348,7 +406,7 @@ sudo journalctl -u cs-manager -n 30 --no-pager
 
 **方案**：面板设置 Cookie 时加 `Domain=.afanai.top`（前面带点），浏览器就会在所有子域名下发送。
 
-**代码位置**：`main.rs` 计算 `cookie_domain = "." + CS_DOMAIN`，`handlers.rs` 的 `session_cookie` 拼入 `; Domain=...`。
+**代码位置**：`main.rs` 计算 `cookie_domain = "." + CS_DOMAIN`，`handlers/mod.rs` 的 `session_cookie` 拼入 `; Domain=...`。
 
 **安全提醒**：`.afanai.top` 意味着 Cookie 会发到 v6-codehub、v6-vscode 等所有子域名。当前可接受，未来若要隔离，可改成 `test1.cs.afanai.top` 二级结构，Cookie 设为 `.cs.afanai.top`。
 
@@ -741,6 +799,7 @@ docker stats <name> --no-stream
 
 - ✅ 11.2 跨用户同名实例（commit `ff02849`）
 - ✅ 11.5 审计日志（commit `ff02849`）
+- ✅ 11.9 代码结构重构（见 §4.2，阶段一 + 阶段二）
 - ⬜ 11.1 自动拉镜像、11.3 rootless Docker、11.4 邮件邀请、11.6 实例模板、11.7 PWA、11.8 多节点 — 待实现
 
 ### 11.1 P1：创建实例时自动拉镜像
@@ -833,6 +892,12 @@ if docker.inspect_image(spec.image).await.is_err() {
 **需求**：容器跑在多台机器上。
 
 **改动**：把 Docker 操作抽象成 `ContainerBackend` trait，实现本地和远程两种。改动大，非当前目标。
+
+### 11.9 代码结构重构 ✅ 已完成（见 §4.2）
+
+**背景**：代码复查发现 `handlers.rs` 单文件近 900 行、CSRF/Cookie 逻辑在十余个 handler 中重复、`auth_verify` 未用 `container_name()` 解析容器名、审计日志用裸 6-tuple 传递。
+
+**改动**：分三个阶段，阶段一（紧急修复）与阶段二（结构优化）已完成，详见 §4.2。阶段三（可选，未做）：为 `docker_ops` 与 `auth` 补充集成测试、引入 `cargo clippy` 到 CI。
 
 ---
 

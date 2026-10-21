@@ -1,6 +1,6 @@
 use maud::{html, Markup, DOCTYPE};
 
-use crate::auth::User;
+use crate::auth::{AuditLogEntry, User};
 use crate::docker_ops::InstanceInfo;
 use crate::Config;
 
@@ -295,7 +295,7 @@ pub fn admin_users_page(
 
 pub fn admin_audit_logs_page(
     user: &User,
-    logs: &[(i64, String, String, Option<String>, Option<String>, String)],
+    logs: &[AuditLogEntry],
     csrf_token: &str,
 ) -> Markup {
     layout(Some(user), html! {
@@ -313,26 +313,26 @@ pub fn admin_audit_logs_page(
                     }
                 }
                 tbody {
-                    @for (id, username, action, target, detail, created_at) in logs {
+                    @for log in logs {
                         tr {
-                            td { (id) }
-                            td { (username) }
-                            td { (action) }
+                            td { (log.id) }
+                            td { (log.username) }
+                            td { (log.action) }
                             td {
-                                @if let Some(t) = target {
+                                @if let Some(t) = &log.target {
                                     (t)
                                 } @else {
                                     "-"
                                 }
                             }
                             td {
-                                @if let Some(d) = detail {
+                                @if let Some(d) = &log.detail {
                                     (d)
                                 } @else {
                                     "-"
                                 }
                             }
-                            td { (created_at) }
+                            td { (log.created_at) }
                         }
                     }
                 }
@@ -354,22 +354,22 @@ mod tests {
             must_change_password: false,
         };
         let logs = vec![
-            (
-                5i64,
-                "admin".to_string(),
-                "create_instance".to_string(),
-                Some("devbox".to_string()),
-                Some("mem=1024MB cpus=2 port=8200".to_string()),
-                "2026-10-21 10:00:00".to_string(),
-            ),
-            (
-                4i64,
-                "bob".to_string(),
-                "login".to_string(),
-                Some("bob".to_string()),
-                None,
-                "2026-10-21 09:30:00".to_string(),
-            ),
+            AuditLogEntry {
+                id: 5,
+                username: "admin".into(),
+                action: "create_instance".into(),
+                target: Some("devbox".into()),
+                detail: Some("mem=1024MB cpus=2 port=8200".into()),
+                created_at: "2026-10-21 10:00:00".into(),
+            },
+            AuditLogEntry {
+                id: 4,
+                username: "bob".into(),
+                action: "login".into(),
+                target: Some("bob".into()),
+                detail: None,
+                created_at: "2026-10-21 09:30:00".into(),
+            },
         ];
         let html = admin_audit_logs_page(&user, &logs, "token-abc").into_string();
 
@@ -395,7 +395,7 @@ mod tests {
             role: "admin".into(),
             must_change_password: false,
         };
-        let logs: Vec<(i64, String, String, Option<String>, Option<String>, String)> = vec![];
+        let logs: Vec<AuditLogEntry> = vec![];
         let html = admin_audit_logs_page(&user, &logs, "token-xyz").into_string();
 
         assert!(html.contains("审计日志"));

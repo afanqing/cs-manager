@@ -9,29 +9,49 @@ use bollard::{
     Docker,
 };
 
+/// 面板首页展示的实例信息，来自 Docker label 和 inspect 结果。
 pub struct InstanceInfo {
+    /// 实例名（`cs-name` label，支持跨用户同名）。
     pub name: String,
+    /// 容器状态（running / exited / created 等）。
     pub state: String,
+    /// 宿主机端口（`cs-port` label）。
     pub port: u16,
+    /// 内存上限（MB），优先取 Docker inspect 的实际值。
     pub mem: u32,
+    /// CPU 上限（核数），优先取 Docker inspect 的实际值。
     pub cpus: f32,
+    /// 归属用户名（`cs-owner` label）。
     pub owner: String,
 }
 
+/// 创建实例的参数。
 pub struct CreateSpec<'a> {
+    /// 实例名（已清理的 kebab-case）。
     pub name: &'a str,
+    /// 归属用户名。
     pub owner: &'a str,
+    /// 内存上限（MB）。
     pub mem: u32,
+    /// CPU 上限（核数）。
     pub cpus: f32,
+    /// 可选的 git 仓库 URL，创建时 clone 到 project/ 目录。
     pub git: Option<&'a str>,
+    /// 分配的宿主机端口。
     pub port: u16,
+    /// 实例数据目录根路径。
     pub base_dir: &'a str,
+    /// code-server Docker 镜像。
     pub image: &'a str,
 }
 
+/// 内存下限（MB）。
 pub const MIN_MEMORY_MB: u32 = 256;
+/// 内存上限（MB）。
 pub const MAX_MEMORY_MB: u32 = 8192;
+/// CPU 下限（核数）。
 pub const MIN_CPUS: f32 = 0.1;
+/// CPU 上限（核数）。
 pub const MAX_CPUS: f32 = 8.0;
 
 pub fn validate_resource_limits(mem: u32, cpus: f32) -> anyhow::Result<()> {

@@ -1,5 +1,10 @@
 use rusqlite::{Connection, Result};
 
+/// 初始化 SQLite 数据库。
+///
+/// - 自动创建父目录
+/// - 开启 WAL 模式、外键约束、busy_timeout
+/// - 创建 `users`、`sessions`、`audit_log` 表（如不存在）
 pub fn init(path: &str) -> Result<Connection> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(parent);

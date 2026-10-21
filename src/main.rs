@@ -4,6 +4,11 @@ mod docker_ops;
 mod handlers;
 mod templates;
 
+use handlers::admin;
+use handlers::auth_handlers;
+use handlers::auth_verify;
+use handlers::instance;
+
 use std::sync::Arc;
 
 use axum::{
@@ -14,20 +19,31 @@ use bollard::Docker;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
 
+/// 全局应用状态，通过 `State` 注入到所有 handler。
 #[derive(Clone)]
 pub struct AppState {
+    /// SQLite 连接（Tokio Mutex 保护，跨 await 持锁）。
     pub db: Arc<Mutex<Connection>>,
+    /// Bollard Docker 客户端。
     pub docker: Arc<Docker>,
+    /// 面板配置。
     pub config: Arc<Config>,
 }
 
+/// 面板运行时配置，全部来自环境变量。
 #[derive(Clone)]
 pub struct Config {
+    /// 实例子域名后缀（如 `afanai.top`），用于生成 `cs-<name>.<suffix>` 链接。
     pub hostname_suffix: String,
+    /// 实例数据目录根路径（如 `/opt/code-server-instances`）。
     pub base_dir: String,
+    /// 实例端口分配下限（含）。
     pub port_min: u16,
+    /// 实例端口分配上限（含）。
     pub port_max: u16,
+    /// code-server Docker 镜像。
     pub image: String,
+    /// Cookie 的 Domain 属性（如 `.afanai.top`），None 表示 host-only。
     pub cookie_domain: Option<String>,
 }
 
@@ -70,24 +86,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        .route("/login", get(handlers::login_page).post(handlers::login_submit))
-        .route("/logout", post(handlers::logout))
-        .route("/", get(handlers::index))
-        .route("/instances", post(handlers::create_instance))
-        .route("/instances/:name/action", post(handlers::instance_action))
-        .route("/instances/:name/resources", post(handlers::update_instance_resources))
+        .route("/login", get(auth_handlers::login_page).post(auth_handlers::login_submit))
+        .route("/logout", post(auth_handlers::logout))
+        .route("/", get(instance::index))
+        .route("/instances", post(instance::create_instance))
+        .route("/instances/:name/action", post(instance::instance_action))
+        .route("/instances/:name/resources", post(instance::update_instance_resources))
         .route(
             "/change-password",
-            get(handlers::change_password_page).post(handlers::change_password_submit),
+            get(auth_handlers::change_password_page).post(auth_handlers::change_password_submit),
         )
         .route(
             "/admin/users",
-            get(handlers::admin_users_page).post(handlers::admin_create_user),
+            get(admin::admin_users_page).post(admin::admin_create_user),
         )
-        .route("/admin/users/:id/reset", post(handlers::admin_reset_password))
-        .route("/admin/users/:id/delete", post(handlers::admin_delete_user))
-        .route("/admin/audit-logs", get(handlers::admin_audit_logs_page))
-        .route("/api/auth/verify", get(handlers::auth_verify))
+        .route("/admin/users/:id/reset", post(admin::admin_reset_password))
+        .route("/admin/users/:id/delete", post(admin::admin_delete_user))
+        .route("/admin/audit-logs", get(admin::admin_audit_logs_page))
+        .route("/api/auth/verify", get(auth_verify::auth_verify))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8100").await?;

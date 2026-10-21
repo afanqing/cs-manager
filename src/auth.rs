@@ -33,6 +33,19 @@ pub struct User {
     pub must_change_password: bool,
 }
 
+/// 审计日志条目。
+///
+/// 对应 `audit_log` 表的一行，`list_audit_logs` 返回此结构体的列表。
+#[derive(Clone, Debug)]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub username: String,
+    pub action: String,
+    pub target: Option<String>,
+    pub detail: Option<String>,
+    pub created_at: String,
+}
+
 pub fn ensure_admin(conn: &Connection, admin_password: &Option<String>) -> anyhow::Result<()> {
     let count: i64 =
         conn.query_row("SELECT COUNT(*) FROM users WHERE role='admin'", [], |r| r.get(0))?;
@@ -137,25 +150,22 @@ pub fn insert_audit_log(
     Ok(())
 }
 
-/// 查询审计日志（最近 N 条）
-pub fn list_audit_logs(
-    conn: &Connection,
-    limit: i64,
-) -> anyhow::Result<Vec<(i64, String, String, Option<String>, Option<String>, String)>> {
+/// 查询审计日志（最近 N 条，按 id 倒序）。
+pub fn list_audit_logs(conn: &Connection, limit: i64) -> anyhow::Result<Vec<AuditLogEntry>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, u.username, a.action, a.target, a.detail, a.created_at
          FROM audit_log a JOIN users u ON u.id = a.user_id
          ORDER BY a.id DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit], |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-        ))
+        Ok(AuditLogEntry {
+            id: r.get(0)?,
+            username: r.get(1)?,
+            action: r.get(2)?,
+            target: r.get(3)?,
+            detail: r.get(4)?,
+            created_at: r.get(5)?,
+        })
     })?;
     let mut result = Vec::new();
     for row in rows {
@@ -209,9 +219,9 @@ mod tests {
         let logs = list_audit_logs(&conn, 10).unwrap();
         assert_eq!(logs.len(), 3);
         // order by id DESC, newest first
-        assert_eq!(logs[0].2, "stop");
-        assert_eq!(logs[1].2, "create_instance");
-        assert_eq!(logs[2].2, "login");
+        assert_eq!(logs[0].action, "stop");
+        assert_eq!(logs[1].action, "create_instance");
+        assert_eq!(logs[2].action, "login");
     }
 
     #[test]
@@ -239,16 +249,16 @@ mod tests {
         // target and detail are None
         insert_audit_log(&conn, 1, "logout", None, None).unwrap();
         let logs = list_audit_logs(&conn, 1).unwrap();
-        assert_eq!(logs[0].2, "logout");
-        assert_eq!(logs[0].3, None);
-        assert_eq!(logs[0].4, None);
+        assert_eq!(logs[0].action, "logout");
+        assert_eq!(logs[0].target, None);
+        assert_eq!(logs[0].detail, None);
 
         // target is Some, detail is None
         insert_audit_log(&conn, 1, "delete", Some("user_bob"), None).unwrap();
         let logs = list_audit_logs(&conn, 1).unwrap();
-        assert_eq!(logs[0].2, "delete");
-        assert_eq!(logs[0].3, Some("user_bob".to_string()));
-        assert_eq!(logs[0].4, None);
+        assert_eq!(logs[0].action, "delete");
+        assert_eq!(logs[0].target, Some("user_bob".to_string()));
+        assert_eq!(logs[0].detail, None);
     }
 
     #[test]
@@ -258,6 +268,6 @@ mod tests {
         insert_audit_log(&conn, 1, "change_password", None, None).unwrap();
         let logs = list_audit_logs(&conn, 1).unwrap();
         // username from JOIN
-        assert_eq!(logs[0].1, "admin");
+        assert_eq!(logs[0].username, "admin");
     }
 }
