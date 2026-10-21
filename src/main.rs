@@ -79,6 +79,11 @@ async fn main() -> anyhow::Result<()> {
 
     auth::ensure_admin(&conn, &std::env::var("CS_ADMIN_PASSWORD").ok())?;
 
+    // 初始化默认镜像（从 CS_IMAGE 环境变量读取）
+    let default_image = std::env::var("CS_IMAGE")
+        .unwrap_or_else(|_| "codercom/code-server:latest".into());
+    db::ensure_default_image(&conn, &default_image)?;
+
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         docker: Arc::new(docker),
@@ -103,6 +108,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/users/:id/reset", post(admin::admin_reset_password))
         .route("/admin/users/:id/delete", post(admin::admin_delete_user))
         .route("/admin/audit-logs", get(admin::admin_audit_logs_page))
+        .route(
+            "/admin/images",
+            get(admin::admin_images_page).post(admin::admin_create_image),
+        )
+        .route("/admin/images/:id/delete", post(admin::admin_delete_image))
+        .route("/admin/images/:id/set-default", post(admin::admin_set_default_image))
+        .route("/admin/images/:id/pull", post(admin::admin_pull_image))
         .route("/api/auth/verify", get(auth_verify::auth_verify))
         .with_state(state);
 

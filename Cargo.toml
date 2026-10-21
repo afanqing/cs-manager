@@ -9,6 +9,7 @@ argon2 = "0.5"
 axum = "0.7"
 axum-extra = { version = "0.9", features = ["cookie"] }
 bollard = "0.16"
+futures-util = "0.3"
 maud = { version = "0.26", features = ["axum"] }
 rand = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }

@@ -255,3 +255,220 @@ pub async fn admin_audit_logs_page(State(state): State<AppState>, jar: CookieJar
         templates::admin_audit_logs_page(&user, &logs, token).into_response()
     })
 }
+
+/// 镜像管理页面。
+pub async fn admin_images_page(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let (user, _) = match require_user(&state, &jar).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if user.role != "admin" {
+        return (StatusCode::FORBIDDEN, "仅管理员可访问").into_response();
+    }
+
+    let db = state.db.lock().await;
+    let images = crate::db::list_images(&db).unwrap_or_default();
+    drop(db);
+
+    super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
+        templates::admin_images_page(&user, &images, None, None, token).into_response()
+    })
+}
+
+/// 创建新镜像。
+pub async fn admin_create_image(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<super::ImageForm>,
+) -> Response {
+    if let Err(resp) = require_csrf(&jar, form.csrf_token.as_deref()) {
+        return resp;
+    }
+
+    let (user, _) = match require_user(&state, &jar).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if user.role != "admin" {
+        return (StatusCode::FORBIDDEN, "仅管理员可操作").into_response();
+    }
+
+    let name = form.name.trim().to_string();
+    let image = form.image.trim().to_string();
+    let description = form.description.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    if name.is_empty() || image.is_empty() {
+        return Redirect::to("/admin/images?err=empty").into_response();
+    }
+
+    let db = state.db.lock().await;
+    let res = crate::db::create_image(&db, &name, &image, description, false);
+    
+    if res.is_ok() {
+        let _ = auth::insert_audit_log(
+            &db,
+            user.id,
+            "create_image",
+            Some(&name),
+            Some(&format!("image={}", image)),
+        );
+    }
+    drop(db);
+
+    match res {
+        Ok(_) => Redirect::to("/admin/images?ok=created").into_response(),
+        Err(_) => Redirect::to("/admin/images?err=dup").into_response(),
+    }
+}
+
+/// 删除镜像。
+pub async fn admin_delete_image(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+    Form(form): Form<super::CsrfForm>,
+) -> Response {
+    if let Err(resp) = require_csrf(&jar, form.csrf_token.as_deref()) {
+        return resp;
+    }
+
+    let (user, _) = match require_user(&state, &jar).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if user.role != "admin" {
+        return (StatusCode::FORBIDDEN, "仅管理员可操作").into_response();
+    }
+
+    let db = state.db.lock().await;
+    
+    // 检查是否为默认镜像
+    if let Ok(Some(img)) = crate::db::get_default_image(&db) {
+        if img.id == id {
+            drop(db);
+            return Redirect::to("/admin/images?err=default").into_response();
+        }
+    }
+    
+    let res = crate::db::delete_image(&db, id);
+    
+    if res.is_ok() {
+        let _ = auth::insert_audit_log(
+            &db,
+            user.id,
+            "delete_image",
+            Some(&id.to_string()),
+            None,
+        );
+    }
+    drop(db);
+
+    match res {
+        Ok(_) => Redirect::to("/admin/images?ok=deleted").into_response(),
+        Err(_) => Redirect::to("/admin/images?err=delete").into_response(),
+    }
+}
+
+/// 设置默认镜像。
+pub async fn admin_set_default_image(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+    Form(form): Form<super::CsrfForm>,
+) -> Response {
+    if let Err(resp) = require_csrf(&jar, form.csrf_token.as_deref()) {
+        return resp;
+    }
+
+    let (user, _) = match require_user(&state, &jar).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if user.role != "admin" {
+        return (StatusCode::FORBIDDEN, "仅管理员可操作").into_response();
+    }
+
+    let db = state.db.lock().await;
+    let res = crate::db::set_default_image(&db, id);
+    
+    if res.is_ok() {
+        let _ = auth::insert_audit_log(
+            &db,
+            user.id,
+            "set_default_image",
+            Some(&id.to_string()),
+            None,
+        );
+    }
+    drop(db);
+
+    match res {
+        Ok(_) => Redirect::to("/admin/images?ok=default").into_response(),
+        Err(_) => Redirect::to("/admin/images?err=set_default").into_response(),
+    }
+}
+
+/// 拉取镜像（异步后台拉取）。
+pub async fn admin_pull_image(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(id): Path<i64>,
+    Form(form): Form<super::CsrfForm>,
+) -> Response {
+    if let Err(resp) = require_csrf(&jar, form.csrf_token.as_deref()) {
+        return resp;
+    }
+
+    let (user, _) = match require_user(&state, &jar).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    if user.role != "admin" {
+        return (StatusCode::FORBIDDEN, "仅管理员可操作").into_response();
+    }
+
+    let db = state.db.lock().await;
+    let image = match crate::db::list_images(&db) {
+        Ok(images) => images.into_iter().find(|img| img.id == id),
+        Err(_) => None,
+    };
+    drop(db);
+
+    let image = match image {
+        Some(img) => img,
+        None => return Redirect::to("/admin/images?err=notfound").into_response(),
+    };
+
+    // 在后台拉取镜像
+    let docker = state.docker.clone();
+    let image_name = image.image.clone();
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+        
+        tracing::info!("开始拉取镜像: {}", image_name);
+        let mut stream = docker.create_image(
+            Some(bollard::image::CreateImageOptions {
+                from_image: image_name.as_str(),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        
+        let mut success = true;
+        while let Some(item) = stream.next().await {
+            if item.is_err() {
+                success = false;
+                break;
+            }
+        }
+        
+        if success {
+            tracing::info!("镜像拉取成功: {}", image_name);
+        } else {
+            tracing::error!("镜像拉取失败: {}", image_name);
+        }
+    });
+
+    Redirect::to("/admin/images?ok=pulling").into_response()
+}

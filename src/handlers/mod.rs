@@ -41,6 +41,7 @@ pub struct CreateForm {
     pub mem: u32,
     pub cpus: f32,
     pub git: Option<String>,
+    pub image_id: Option<i64>,
     pub csrf_token: Option<String>,
 }
 
@@ -86,6 +87,20 @@ pub struct VerifyQuery {
     /// Nginx 从 `cs-<owner>-<name>.<domain>` 子域名中捕获的 `cs-` 之后部分，
     /// 即 `<owner>-<name>`。加回 `cs-` 前缀即为容器名，无需再拆分 owner。
     pub instance: String,
+}
+
+#[derive(Deserialize)]
+pub struct ImageForm {
+    pub name: String,
+    pub image: String,
+    pub description: Option<String>,
+    pub csrf_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ImageActionForm {
+    pub act: String,
+    pub csrf_token: Option<String>,
 }
 
 /// 从 Cookie 中加载当前登录用户及其会话类型。

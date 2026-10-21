@@ -335,6 +335,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "bollard",
+ "futures-util",
  "maud",
  "rand",
  "rusqlite",

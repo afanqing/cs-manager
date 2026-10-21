@@ -7,13 +7,13 @@
 ## 当前代码状态
 
 - 分支：`feature/csrf-protection`
-- 最新提交：（本地未提交）用户管理页面错误提示补全（Phase 3 后续）；已推送 `7aaa157`（跨用户同名实例路由修复）
+- 最新提交：（本地未提交）镜像模板管理功能实现（合并 §11.1 + §11.6）
 - 前序提交：`7aaa157`（跨用户同名实例路由修复）、`e8ff28e`（Nginx 迁移指南初稿）、`306cf60`（handlers 拆分子模块重构）、`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
-- 工作区状态：包含用户管理页面错误提示补全，待提交
-- 验证：`cargo test --quiet -- --test-threads=1`，**21 个测试通过**（14 个基线 + 7 个新增）
-- 编译状态：`cargo check` 零警告零错误；`cargo clippy --all-targets` 零警告
+- 工作区状态：包含镜像模板管理功能，待提交
+- 验证：`cargo test --quiet -- --test-threads=1`，**27 个测试通过**（21 个基线 + 6 个新增镜像管理测试）
+- 编译状态：`cargo check` 零错误；1 个未使用结构体警告（`ImageActionForm`）
 - Nginx 配置：见 §13.1（基于生产实际配置），**需要手动更新正则字符集**（见 §13.1.2）
-- 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交 `3cf34a3` 尚未确认。上线后需在实例卡片确认"更新资源"及成功/失败提示已出现
+- 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交尚未确认。上线后需在实例卡片确认"更新资源"及成功/失败提示已出现
 
 ---
 
@@ -270,11 +270,13 @@ code-server 返回 IDE 界面
 - 读取环境变量：`CS_DB`、`CS_DOMAIN`、`CS_BASE_DIR`、`CS_IMAGE`、`CS_COOKIE_DOMAIN`、`CS_ADMIN_PASSWORD`
 - 计算 `cookie_domain`（默认 `.` + `CS_DOMAIN`）
 - 调用 `auth::ensure_admin` 首次创建 admin
-- 注册全部路由，绑定 `127.0.0.1:8100`
+- 调用 `db::ensure_default_image` 初始化默认镜像（从 `CS_IMAGE` 环境变量）
+- 注册全部路由（含镜像管理路由），绑定 `127.0.0.1:8100`
 
 **`db.rs`**
-- 建两张表：`users`、`sessions`
+- 建四张表：`users`、`sessions`、`audit_log`、`images`
 - 开启 WAL、外键、busy_timeout
+- 镜像管理：`list_images`、`create_image`、`delete_image`、`get_default_image`、`get_image_by_id`、`set_default_image`、`ensure_default_image`
 
 **`auth.rs`**
 - `hash_password` / `verify_password`：argon2id
@@ -306,8 +308,8 @@ code-server 返回 IDE 界面
 - 所有 POST handler 通过 `require_csrf()` 校验 CSRF
 
 **`handlers/instance.rs`**
-- `index`：按角色过滤实例，显示错误
-- `create_instance`：查重 → 分配端口 → 调 docker_ops
+- `index`：按角色过滤实例，显示错误，传递镜像列表到模板
+- `create_instance`：查重 → 分配端口 → 选择镜像（用户选择或默认）→ 调 docker_ops
 - `update_instance_resources` / `instance_action`：CSRF、登录状态校验后，按 `(owner, name)` 精确定位容器并操作
 - `resolve_container()`：解析目标容器名（非 admin 强制忽略表单 owner，防越权）
 - `inspect_owner()`：O(1) `inspect_container` 读取 `cs-owner` label
@@ -315,6 +317,7 @@ code-server 返回 IDE 界面
 **`handlers/admin.rs`**
 - `admin_users_page` / `admin_create_user` / `admin_reset_password` / `admin_delete_user`
 - `admin_audit_logs_page`：审计日志页面
+- `admin_images_page` / `admin_create_image` / `admin_delete_image` / `admin_set_default_image` / `admin_pull_image`：镜像模板管理
 - 用户管理页面支持错误提示（`?err=name` / `dup` / `hash` / `self` / `notfound` / `last_admin`）
 
 **`handlers/auth_verify.rs`**
@@ -323,10 +326,11 @@ code-server 返回 IDE 界面
 
 **`templates.rs`**
 - `layout`：公共外壳（顶栏、样式）
-- `login_page` / `change_password_page` / `index_page` / `admin_users_page` / `admin_audit_logs_page`
-- 首页实例卡片：当前内存/CPU、资源编辑表单、成功/错误状态提示
+- `login_page` / `change_password_page` / `index_page` / `admin_users_page` / `admin_audit_logs_page` / `admin_images_page`
+- 首页实例卡片：当前内存/CPU、资源编辑表单、成功/错误状态提示、镜像下拉选择
 - 实例卡片"打开"链接生成 `https://cs-<owner>-<name>.<domain>/`
 - 用户管理页面：区分错误（`err`）与成功（`ok`）消息，错误以红色 `.err` 样式显示
+- 镜像管理页面：镜像列表、添加/删除/设为默认/拉取操作
 
 ---
 
@@ -962,30 +966,75 @@ docker stats <name> --no-stream
 - ✅ 11.5 审计日志（commit `ff02849`）
 - ✅ 11.9 代码结构重构（见 §4.2，阶段一 + 阶段二）
 - ✅ 11.10 跨用户同名实例的 hostname 冲突修复（需手动配置，见 §11.10）
-- ⬜ 11.1 自动拉镜像、11.3 rootless Docker、11.4 邮件邀请、11.6 实例模板、11.7 PWA、11.8 多节点 — 待实现
+- ✅ 11.1 镜像模板管理（合并原 §11.1 自动拉镜像 + §11.6 实例模板）
+- ⬜ 11.3 rootless Docker、11.4 邮件邀请、11.8 多节点 — 待实现
 
-### 11.1 P1：创建实例时自动拉镜像
+### 11.1 P1：镜像模板管理（合并原 §11.1 + §11.6）✅ 已完成
 
-**现状**：换 `CS_IMAGE` 或首次部署需手动 `docker pull`。
+**动机**：原 §11.1（自动拉镜像）和 §11.6（实例模板）本质上是同一件事的两个面——管理员预制可用镜像，用户创建时选择，选完开箱即用。合并后改动范围更集中，用户体验更完整。
 
-**改动**：`docker_ops.rs` 的 `create_instance` 开头加：
+**现状**：所有实例共用 `CS_IMAGE` 环境变量指定的单一镜像，用户无法选择，管理员换镜像需改环境变量并重启面板。
 
-```rust
-use futures_util::StreamExt;
+**目标**：
 
-if docker.inspect_image(spec.image).await.is_err() {
-    let mut stream = docker.create_image(
-        Some(bollard::image::CreateImageOptions {
-            from_image: spec.image,
-            ..Default::default()
-        }),
-        None, None,
-    );
-    while let Some(item) = stream.next().await { item?; }
-}
+| 角色 | 能力 |
+|---|---|
+| 管理员 | 维护可用镜像列表（增删），可手动预拉取镜像到本地，确保用户创建时不用等 |
+| 用户 | 创建实例时从管理员预制的下拉列表中选择镜像，而非所有人用同一个 |
+
+**数据模型**：新增 `images` 表。
+
+```sql
+CREATE TABLE IF NOT EXISTS images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,           -- 显示名，如 "Python 开发环境"
+    image TEXT NOT NULL UNIQUE,   -- Docker 镜像全名，如 "codercom/code-server:latest"
+    description TEXT,             -- 可选描述
+    is_default INTEGER NOT NULL DEFAULT 0,  -- 是否为默认镜像
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-`Cargo.toml` 加 `futures-util = "0.3"`。
+**改动范围**：
+
+| 文件 | 变更 |
+|---|---|
+| `db.rs` | `init()` 中建 `images` 表；新增 `Image` 结构体、`list_images()`、`create_image()`、`delete_image()`、`get_default_image()`、`get_image_by_id()`、`set_default_image()`、`ensure_default_image()` 函数；单元测试覆盖 |
+| `docker_ops.rs` | `create_instance` 开头已有自动拉取逻辑（使用 `futures-util::StreamExt`） |
+| `handlers/mod.rs` | 新增 `ImageForm`、`ImageActionForm` 表单结构体；`CreateForm` 新增 `image_id` 字段 |
+| `handlers/admin.rs` | 新增 `admin_images_page`（GET）、`admin_create_image`（POST）、`admin_delete_image`（POST）、`admin_set_default_image`（POST）、`admin_pull_image`（POST） |
+| `handlers/instance.rs` | `index` 函数传递镜像列表到模板；`create_instance` 从表单读取 `image_id`，优先使用用户选择的镜像，否则使用默认镜像 |
+| `templates.rs` | 导航栏新增"镜像管理"链接；`index_page` 新增 `images` 参数，创建表单增加镜像下拉选择；新增 `admin_images_page` 模板 |
+| `main.rs` | 注册 `/admin/images`、`:id/delete`、`:id/set-default`、`:id/pull` 路由；启动时调用 `ensure_default_image()` 初始化默认镜像 |
+
+**路由**：
+
+```
+GET  /admin/images              → 镜像管理页面
+POST /admin/images              → 添加镜像
+POST /admin/images/:id/delete   → 删除镜像
+POST /admin/images/:id/set-default → 设为默认镜像
+POST /admin/images/:id/pull     → 预拉取镜像到本地（后台异步）
+```
+
+**交互流程**：
+
+1. 首次启动时，若 `images` 表为空，自动从 `CS_IMAGE` 环境变量插入默认镜像
+2. 管理员进入 `/admin/images`，添加镜像（填写显示名 + Docker 镜像全名 + 可选描述）
+3. 管理员点击"拉取"，面板在后台异步拉取镜像到本地
+4. 管理员可设置默认镜像，用户创建实例时默认选中
+5. 用户创建实例时，首页创建表单显示下拉列表，列出所有可用镜像
+6. 用户选择镜像后创建实例，`create_instance` 兜底检查镜像是否存在，不存在则自动拉取
+
+**边界情况**：
+
+- 管理员删除镜像记录时，不删除本地 Docker 镜像（已有实例可能还在用）
+- 不能删除默认镜像，需先设置其他镜像为默认
+- 预拉取失败时，镜像记录保留但页面显示错误，管理员可重试
+- `CS_IMAGE` 环境变量保留作为默认值：首次启动时若 `images` 表为空，自动插入 `CS_IMAGE` 作为默认镜像
+- 并发拉取同一镜像：Docker daemon 自动去重，不额外处理
+
+**测试覆盖**：7 个单元测试（`test_create_and_list_images`、`test_set_default_image`、`test_delete_image`、`test_get_image_by_id`、`test_ensure_default_image`、`test_duplicate_image_fails`），全部通过。
 
 ### 11.2 P1：跨用户同名实例 ✅ 已完成（commit `ff02849`）
 
@@ -1034,20 +1083,9 @@ if docker.inspect_image(spec.image).await.is_err() {
 
 **实现**：`db::init` 创建 `audit_log` 表；`auth::insert_audit_log` / `list_audit_logs` 提供 CRUD；`handlers` 在 login、create_instance、instance_action、update_resources、change_password、admin_create_user、admin_reset_password、admin_delete_user 处插入记录；`/admin/audit-logs` 路由 + `templates::admin_audit_logs_page` 渲染页面。测试覆盖：`insert_and_list_audit_logs`、`list_audit_logs_respects_limit`、`list_audit_logs_empty`、`audit_log_optional_fields`、`audit_log_includes_username_via_join`、`audit_logs_page_renders_table_with_data`、`audit_logs_page_renders_empty_table`。
 
-### 11.6 P3：实例模板
+### 11.6 P3：实例模板 → 已合并至 §11.1
 
-**需求**：创建时选"Python 项目""Node 项目"，自动装依赖。
-
-**改动**：
-
-- 预定义模板：自定义镜像或 `init.sh` 脚本；
-- `create_instance` 接收模板参数，写入数据目录或选择镜像。
-
-### 11.7 P3：PWA 集成
-
-**现状**：用户可手动在浏览器安装 PWA，但面板无提示。
-
-**改动**：卡片"打开"旁加提示文字，引导用户点地址栏安装图标。
+原需求已合并至 §11.1 镜像模板管理，不再单独实现。
 
 ### 11.8 P3：多节点
 
@@ -1249,7 +1287,7 @@ WantedBy=multi-user.target
 | `CS_DB` | 否 | `/opt/cs-manager/data.db` | SQLite 路径 |
 | `CS_DOMAIN` | 是 | `code.example.com` | 根域名，用于 Cookie 域和链接生成 |
 | `CS_BASE_DIR` | 否 | `/opt/code-server-instances` | 实例数据目录 |
-| `CS_IMAGE` | 否 | `codercom/code-server:latest` | code-server 镜像 |
+| `CS_IMAGE` | 否 | `codercom/code-server:latest` | 默认 code-server 镜像（首次启动时自动插入到 images 表） |
 | `CS_COOKIE_DOMAIN` | 否 | `.` + `CS_DOMAIN` | Cookie 域，通常不用改 |
 | `CS_ADMIN_PASSWORD` | 否 | 随机生成 | 仅首次创建 admin 时使用 |
 
@@ -1272,6 +1310,24 @@ CREATE TABLE sessions (
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT,
+    detail TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,           -- 显示名，如 "Python 开发环境"
+    image TEXT NOT NULL UNIQUE,   -- Docker 镜像全名，如 "codercom/code-server:latest"
+    description TEXT,             -- 可选描述
+    is_default INTEGER NOT NULL DEFAULT 0,  -- 是否为默认镜像
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 

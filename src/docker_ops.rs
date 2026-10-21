@@ -8,6 +8,7 @@ use bollard::{
     models::{HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum},
     Docker,
 };
+use futures_util::StreamExt;
 
 /// 面板首页展示的实例信息，来自 Docker label 和 inspect 结果。
 pub struct InstanceInfo {
@@ -165,6 +166,22 @@ pub fn container_name_from_host(host_part: &str) -> Option<String> {
 pub async fn create_instance(docker: &Docker, spec: CreateSpec<'_>) -> anyhow::Result<()> {
     let cname = container_name(spec.owner, spec.name);
     let data_dir = format!("{}/{}/{}", spec.base_dir, spec.owner, spec.name);
+
+    // 镜像不存在时自动拉取
+    if docker.inspect_image(spec.image).await.is_err() {
+        tracing::info!("镜像 {} 不存在，正在拉取...", spec.image);
+        let mut stream = docker.create_image(
+            Some(bollard::image::CreateImageOptions {
+                from_image: spec.image,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(item) = stream.next().await {
+            item?;
+        }
+    }
 
     // 创建数据目录
     std::fs::create_dir_all(&data_dir)?;

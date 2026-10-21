@@ -101,6 +101,8 @@ pub fn layout(user: Option<&User>, body: Markup, csrf_token: &str) -> Markup {
                                 " | "
                                 a href="/admin/users" { "用户管理" }
                                 " | "
+                                a href="/admin/images" { "镜像管理" }
+                                " | "
                                 a href="/admin/audit-logs" { "审计日志" }
                                 " | "
                                 form method="post" action="/logout" {
@@ -148,10 +150,13 @@ pub fn change_password_page(err: Option<&str>, csrf_token: &str) -> Markup {
     }, csrf_token)
 }
 
+use crate::db::Image;
+
 pub fn index_page(
     user: &User,
     instances: &[InstanceInfo],
     config: &Config,
+    images: &[Image],
     err: Option<&str>,
     ok: Option<&str>,
     csrf_token: &str,
@@ -164,6 +169,7 @@ pub fn index_page(
         Some("resource-range") => Some("内存范围为 256–8192 MB，CPU 范围为 0.1–8 核。"),
         Some("resource") => Some("Docker 未能应用新限制。降低内存时，请先确认当前使用量低于目标值。"),
         Some("notfound") => Some("实例不存在"),
+        Some("image") => Some("镜像选择无效，请重新选择"),
         _ => None,
     };
     let ok_msg = match ok {
@@ -185,6 +191,17 @@ pub fn index_page(
                 input name="mem" type="number" value="1024" min="256" max="8192" style="width:90px" placeholder="内存MB";
                 input name="cpus" type="number" step="0.1" value="1" min="0.1" max="8" style="width:70px" placeholder="CPU";
                 input name="git" placeholder="Git 仓库（可选）" style="width:280px";
+                @if !images.is_empty() {
+                    select name="image_id" {
+                        @for img in images {
+                            @if img.is_default {
+                                option value=(img.id) selected { (img.name) " (" (img.image) ")" }
+                            } @else {
+                                option value=(img.id) { (img.name) " (" (img.image) ")" }
+                            }
+                        }
+                    }
+                }
                 button type="submit" class="btn btn-primary" { "创建" }
             }
         }
@@ -353,6 +370,98 @@ pub fn admin_audit_logs_page(
                                 }
                             }
                             td { (log.created_at) }
+                        }
+                    }
+                }
+            }
+        }
+    }, csrf_token)
+}
+
+pub fn admin_images_page(
+    user: &User,
+    images: &[Image],
+    err: Option<&str>,
+    ok: Option<&str>,
+    csrf_token: &str,
+) -> Markup {
+    let err_msg = match err {
+        Some("empty") => Some("镜像名称和镜像地址不能为空"),
+        Some("dup") => Some("镜像已存在"),
+        Some("delete") => Some("删除失败"),
+        Some("default") => Some("不能删除默认镜像"),
+        Some("set_default") => Some("设置默认镜像失败"),
+        Some("notfound") => Some("镜像不存在"),
+        Some(other) => Some(other),
+        None => None,
+    };
+    let ok_msg = match ok {
+        Some("created") => Some("镜像创建成功"),
+        Some("deleted") => Some("镜像已删除"),
+        Some("default") => Some("默认镜像已更新"),
+        Some("pulling") => Some("镜像正在后台拉取中，请稍候..."),
+        _ => None,
+    };
+    layout(Some(user), html! {
+        h3 { "镜像模板管理" }
+        @if let Some(m) = err_msg {
+            div .card .err role="alert" { (m) }
+        }
+        @if let Some(m) = ok_msg {
+            div .card .ok role="status" { (m) }
+        }
+        div .card {
+            h4 { "添加新镜像" }
+            form method="post" action="/admin/images" {
+                input type="hidden" name="csrf_token" value=(csrf_token);
+                input name="name" placeholder="镜像名称（如：Python 开发环境）" required style="width:200px";
+                input name="image" placeholder="Docker 镜像（如：codercom/code-server:latest）" required style="width:300px";
+                input name="description" placeholder="描述（可选）" style="width:250px";
+                button type="submit" class="btn btn-primary" { "添加镜像" }
+            }
+        }
+        div .table-wrap {
+            table {
+                thead { tr { th { "ID" } th { "名称" } th { "镜像" } th { "描述" } th { "默认" } th { "创建时间" } th { "操作" } } }
+                tbody {
+                    @for img in images {
+                        tr {
+                            td { (img.id) }
+                            td { (img.name) }
+                            td { (img.image) }
+                            td {
+                                @if let Some(desc) = &img.description {
+                                    (desc)
+                                } @else {
+                                    "-"
+                                }
+                            }
+                            td {
+                                @if img.is_default {
+                                    span .ok { "是" }
+                                } @else {
+                                    form method="post" action={ "/admin/images/" (img.id) "/set-default" } style="display:inline" {
+                                        input type="hidden" name="csrf_token" value=(csrf_token);
+                                        button type="submit" class="btn" { "设为默认" }
+                                    }
+                                }
+                            }
+                            td { (img.created_at) }
+                            td {
+                                form method="post" action={ "/admin/images/" (img.id) "/pull" } style="display:inline" {
+                                    input type="hidden" name="csrf_token" value=(csrf_token);
+                                    button type="submit" class="btn" { "拉取" }
+                                }
+                                @if !img.is_default {
+                                    form method="post" action={ "/admin/images/" (img.id) "/delete" } style="display:inline"
+                                        onsubmit="return confirm('确认删除该镜像？')" {
+                                        input type="hidden" name="csrf_token" value=(csrf_token);
+                                        button type="submit" class="btn btn-danger" { "删除" }
+                                    }
+                                } @else {
+                                    span .meta { "（默认）" }
+                                }
+                            }
                         }
                     }
                 }

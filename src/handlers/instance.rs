@@ -32,11 +32,17 @@ pub async fn index(
         .await
         .unwrap_or_default();
 
+    // 获取镜像列表
+    let db = state.db.lock().await;
+    let images = crate::db::list_images(&db).unwrap_or_default();
+    drop(db);
+
     super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
         templates::index_page(
             &user,
             &instances,
             &state.config,
+            &images,
             q.err.as_deref(),
             q.ok.as_deref(),
             token,
@@ -87,6 +93,37 @@ pub async fn create_instance(
     };
 
     let git = form.git.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    
+    // 获取用户选择的镜像，如果没有选择则使用默认镜像
+    let image = if let Some(image_id) = form.image_id {
+        let db = state.db.lock().await;
+        match crate::db::get_image_by_id(&db, image_id) {
+            Ok(Some(img)) => img.image,
+            Ok(None) => {
+                tracing::warn!("镜像 ID {} 不存在，使用默认镜像", image_id);
+                state.config.image.clone()
+            }
+            Err(e) => {
+                tracing::error!("查询镜像失败: {}", e);
+                return Redirect::to("/?err=image").into_response();
+            }
+        }
+    } else {
+        // 使用默认镜像
+        let db = state.db.lock().await;
+        match crate::db::get_default_image(&db) {
+            Ok(Some(img)) => img.image,
+            Ok(None) => {
+                tracing::warn!("没有默认镜像，使用系统配置镜像");
+                state.config.image.clone()
+            }
+            Err(e) => {
+                tracing::error!("查询默认镜像失败: {}", e);
+                return Redirect::to("/?err=image").into_response();
+            }
+        }
+    };
+    
     let spec = CreateSpec {
         name: &name,
         owner: &user.username,
@@ -95,7 +132,7 @@ pub async fn create_instance(
         git,
         port,
         base_dir: &state.config.base_dir,
-        image: &state.config.image,
+        image: &image,
     };
 
     if let Err(e) = docker_ops::create_instance(&state.docker, spec).await {
