@@ -138,6 +138,30 @@ pub fn container_name(owner: &str, name: &str) -> String {
     format!("cs-{}-{}", owner, name)
 }
 
+/// 从 Nginx 子域名捕获段还原容器名。
+///
+/// Nginx 的 `server_name ~^cs-(?<inst>[a-z0-9_-]+)\.<domain>$` 会把 `cs-` 之后的
+/// 全部内容（即 `<owner>-<name>`）捕获为 `$inst`，因此容器名就是 `cs-` + `$inst`。
+/// 用户名与实例名都可能含连字符，这里刻意不做拆分以避免歧义。
+///
+/// 字符集包含 `_`：面板允许用户名含下划线（见 `admin_create_user`），
+/// 且 Docker 容器名允许下划线，因此主机名段必须同样接受，否则这类用户的实例无法路由。
+///
+/// 返回 `None` 表示输入不是合法的小写 kebab-case 主机名段，调用方应拒绝请求，
+/// 避免把任意字符串拼进容器名查询。
+pub fn container_name_from_host(host_part: &str) -> Option<String> {
+    let ok = !host_part.is_empty()
+        && host_part.len() <= 128
+        && !host_part.starts_with('-')
+        && !host_part.starts_with('_')
+        && !host_part.ends_with('-')
+        && !host_part.ends_with('_')
+        && host_part
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    ok.then(|| format!("cs-{host_part}"))
+}
+
 pub async fn create_instance(docker: &Docker, spec: CreateSpec<'_>) -> anyhow::Result<()> {
     let cname = container_name(spec.owner, spec.name);
     let data_dir = format!("{}/{}/{}", spec.base_dir, spec.owner, spec.name);
@@ -303,5 +327,67 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a, "cs-alice-web");
         assert_eq!(b, "cs-bob-web");
+    }
+
+    #[test]
+    fn container_name_from_host_roundtrips_container_name() {
+        // Nginx 捕获 `cs-` 之后的全部内容，因此还原结果必须与 container_name 一致。
+        // 这是"跨用户同名实例"能正确路由的核心不变量。
+        for (owner, name) in [
+            ("alice", "web"),
+            ("bob", "web"),
+            ("alice", "my-project"),
+            ("team-lead", "dev-box"),
+        ] {
+            let cname = container_name(owner, name);
+            let host_part = cname.strip_prefix("cs-").expect("container name has cs- prefix");
+            assert_eq!(container_name_from_host(host_part).as_deref(), Some(cname.as_str()));
+        }
+    }
+
+    #[test]
+    fn container_name_from_host_rejects_malformed_input() {
+        // 防止把任意字符串拼进容器名查询
+        assert_eq!(container_name_from_host(""), None);
+        assert_eq!(container_name_from_host("-leading"), None);
+        assert_eq!(container_name_from_host("trailing-"), None);
+        assert_eq!(container_name_from_host("_leading"), None);
+        assert_eq!(container_name_from_host("trailing_"), None);
+        assert_eq!(container_name_from_host("UPPER"), None);
+        assert_eq!(container_name_from_host("has space"), None);
+        assert_eq!(container_name_from_host("path/../etc"), None);
+        assert_eq!(container_name_from_host("has.dot"), None);
+        assert_eq!(container_name_from_host(&"a".repeat(129)), None);
+    }
+
+    #[test]
+    fn container_name_from_host_accepts_underscores_in_username() {
+        // 面板允许用户名含下划线（见 admin_create_user），主机名段必须同样接受，
+        // 否则这类用户的实例永远无法路由。
+        assert_eq!(
+            container_name_from_host("foo_bar-web").as_deref(),
+            Some("cs-foo_bar-web")
+        );
+        // 往返：含下划线的用户名生成的容器名能正确还原
+        let cname = container_name("foo_bar", "web");
+        let host_part = cname.strip_prefix("cs-").unwrap();
+        assert_eq!(container_name_from_host(host_part).as_deref(), Some(cname.as_str()));
+    }
+
+    #[test]
+    fn container_name_from_host_accepts_valid_kebab_case() {
+        assert_eq!(
+            container_name_from_host("alice-web").as_deref(),
+            Some("cs-alice-web")
+        );
+        assert_eq!(container_name_from_host("a").as_deref(), Some("cs-a"));
+
+        // 长度上限边界：128 字符可接受，129 字符拒绝
+        let longest = "a".repeat(128);
+        let expected = format!("cs-{longest}");
+        assert_eq!(
+            container_name_from_host(&longest).as_deref(),
+            Some(expected.as_str())
+        );
     }
 }

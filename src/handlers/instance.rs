@@ -118,6 +118,29 @@ pub async fn create_instance(
     Redirect::to("/").into_response()
 }
 
+/// 解析目标实例的容器名。
+///
+/// 非 admin 用户**强制**使用自己的用户名作为 owner，忽略表单提交的 owner，
+/// 避免越权操作他人的同名实例；admin 则信任表单提交的 owner（缺省回退到自己）。
+fn resolve_container(user: &auth::User, name: &str, owner_hint: Option<&str>) -> String {
+    let owner = if user.role == "admin" {
+        owner_hint.unwrap_or(user.username.as_str())
+    } else {
+        user.username.as_str()
+    };
+    docker_ops::container_name(owner, name)
+}
+
+/// 通过容器名直接定位实例，返回 label 中的 `cs-owner`。
+///
+/// 用 `inspect_container` 做 O(1) 定位，替代全量 `list_instances` 后按名字查找，
+/// 后者在跨用户同名实例场景下会命中错误的容器。
+async fn inspect_owner(state: &AppState, cname: &str) -> Option<String> {
+    let info = state.docker.inspect_container(cname, None).await.ok()?;
+    let labels = info.config.as_ref()?.labels.clone()?;
+    labels.get("cs-owner").cloned()
+}
+
 /// 实例启停删操作。
 pub async fn instance_action(
     State(state): State<AppState>,
@@ -134,19 +157,16 @@ pub async fn instance_action(
         Err(resp) => return resp,
     };
 
-    let instances = docker_ops::list_instances(&state.docker, None)
-        .await
-        .unwrap_or_default();
-    let inst = match instances.iter().find(|i| i.name == name) {
-        Some(i) => i,
+    // 按 (owner, name) 精确定位容器，避免同名实例歧义
+    let cname = resolve_container(&user, &name, form.owner.as_deref());
+    let owner = match inspect_owner(&state, &cname).await {
+        Some(o) => o,
         None => return Redirect::to("/?err=notfound").into_response(),
     };
-    if user.role != "admin" && inst.owner != user.username {
+    if user.role != "admin" && owner != user.username {
         return (StatusCode::FORBIDDEN, "无权限操作该实例").into_response();
     }
 
-    // 使用 container_name 获取实际容器名（支持跨用户同名实例）
-    let cname = docker_ops::container_name(&inst.owner, &name);
     let act = form.act.as_str();
     let res = match act {
         "start" => docker_ops::start(&state.docker, &cname).await,
@@ -166,7 +186,7 @@ pub async fn instance_action(
             user.id,
             act,
             Some(&name),
-            Some(&format!("owner={}", inst.owner)),
+            Some(&format!("owner={owner} container={cname}")),
         );
     }
 
@@ -189,14 +209,13 @@ pub async fn update_instance_resources(
         Err(resp) => return resp,
     };
 
-    let instances = docker_ops::list_instances(&state.docker, None)
-        .await
-        .unwrap_or_default();
-    let inst = match instances.iter().find(|i| i.name == name) {
-        Some(i) => i,
+    // 按 (owner, name) 精确定位容器，避免同名实例歧义
+    let cname = resolve_container(&user, &name, form.owner.as_deref());
+    let owner = match inspect_owner(&state, &cname).await {
+        Some(o) => o,
         None => return Redirect::to("/?err=notfound").into_response(),
     };
-    if user.role != "admin" && inst.owner != user.username {
+    if user.role != "admin" && owner != user.username {
         return (StatusCode::FORBIDDEN, "无权限调整该实例资源").into_response();
     }
 
@@ -204,8 +223,6 @@ pub async fn update_instance_resources(
         return Redirect::to("/?err=resource-range").into_response();
     }
 
-    // 使用 container_name 获取实际容器名（支持跨用户同名实例）
-    let cname = docker_ops::container_name(&inst.owner, &name);
     if let Err(e) = docker_ops::update_resources(&state.docker, &cname, form.mem, form.cpus).await {
         tracing::error!("update resources for {cname} failed: {e}");
         return Redirect::to("/?err=resource").into_response();
@@ -219,9 +236,70 @@ pub async fn update_instance_resources(
             user.id,
             "update_resources",
             Some(&name),
-            Some(&format!("mem={}MB cpus={}", form.mem, form.cpus)),
+            Some(&format!(
+                "mem={}MB cpus={} owner={owner} container={cname}",
+                form.mem, form.cpus
+            )),
         );
     }
 
     Redirect::to("/?ok=resources").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::User;
+
+    fn user(username: &str, role: &str) -> User {
+        User {
+            id: 1,
+            username: username.to_string(),
+            role: role.to_string(),
+            must_change_password: false,
+        }
+    }
+
+    #[test]
+    fn member_cannot_target_another_users_container() {
+        // 非 admin 用户即使伪造 owner 表单字段，也必须被强制解析到自己的容器，
+        // 否则可越权启停/删除他人的同名实例。
+        let alice = user("alice", "member");
+        assert_eq!(resolve_container(&alice, "web", None), "cs-alice-web");
+        assert_eq!(
+            resolve_container(&alice, "web", Some("bob")),
+            "cs-alice-web",
+            "member 提交的 owner 必须被忽略"
+        );
+        assert_eq!(
+            resolve_container(&alice, "web", Some("admin")),
+            "cs-alice-web"
+        );
+    }
+
+    #[test]
+    fn admin_honors_owner_hint() {
+        let admin = user("root", "admin");
+        // admin 需要能操作任意用户的实例，因此信任表单提交的 owner
+        assert_eq!(resolve_container(&admin, "web", Some("bob")), "cs-bob-web");
+        assert_eq!(resolve_container(&admin, "web", Some("alice")), "cs-alice-web");
+        // 缺省时回退到 admin 自身用户名
+        assert_eq!(resolve_container(&admin, "web", None), "cs-root-web");
+    }
+
+    #[test]
+    fn same_instance_name_resolves_to_distinct_containers() {
+        // 跨用户同名实例：alice 与 bob 各有 "web"，必须解析到不同容器
+        let alice = user("alice", "member");
+        let bob = user("bob", "member");
+        let admin = user("root", "admin");
+
+        assert_ne!(
+            resolve_container(&alice, "web", None),
+            resolve_container(&bob, "web", None)
+        );
+        // admin 通过 owner 提示可分别定位两者
+        assert_eq!(resolve_container(&admin, "web", Some("alice")), "cs-alice-web");
+        assert_eq!(resolve_container(&admin, "web", Some("bob")), "cs-bob-web");
+    }
 }

@@ -199,7 +199,7 @@ pub fn index_page(
                     span class=(inst.state.as_str()) { "[" (inst.state) "]" }
                     @if inst.state == "running" {
                         " "
-                        a href={ "https://cs-" (inst.name) "." (config.hostname_suffix) "/" } target="_blank" { "打开" }
+                        a href={ "https://cs-" (inst.owner) "-" (inst.name) "." (config.hostname_suffix) "/" } target="_blank" { "打开" }
                     }
                     br;
                     span .meta {
@@ -208,6 +208,8 @@ pub fn index_page(
                     br;
                     form method="post" action={ "/instances/" (inst.name) "/resources" } class="resource-form" {
                         input type="hidden" name="csrf_token" value=(csrf_token);
+                        // 跨用户同名实例：必须带上 owner 才能精确定位目标容器
+                        input type="hidden" name="owner" value=(inst.owner);
                         label {
                             "内存 "
                             input name="mem" type="number" value=(inst.mem) min="256" max="8192" step="256" placeholder="例如：1024" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="width:90px";
@@ -225,6 +227,8 @@ pub fn index_page(
                     br;
                     form method="post" action={ "/instances/" (inst.name) "/action" } {
                         input type="hidden" name="csrf_token" value=(csrf_token);
+                        // 跨用户同名实例：必须带上 owner 才能精确定位目标容器
+                        input type="hidden" name="owner" value=(inst.owner);
                         button name="act" value="start" class="btn" { "启动" }
                         button name="act" value="stop" class="btn" { "停止" }
                         button name="act" value="remove" class="btn btn-danger"

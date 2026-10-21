@@ -27,8 +27,13 @@ pub async fn auth_verify(
         return StatusCode::PRECONDITION_REQUIRED.into_response();
     }
 
-    // 使用 container_name 查找实际容器（支持跨用户同名实例）
-    let cname = docker_ops::container_name(&user.username, &q.instance);
+    // Nginx 的 server_name 正则捕获 `cs-` 之后的全部内容（即 `<owner>-<name>`），
+    // 与容器名 `cs-<owner>-<name>` 一一对应，因此直接加回前缀即可定位容器。
+    // 用户名与实例名都可能含连字符，不做拆分以避免歧义。
+    let cname = match docker_ops::container_name_from_host(&q.instance) {
+        Some(n) => n,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let info = match state.docker.inspect_container(&cname, None).await {
         Ok(c) => c,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -38,6 +43,7 @@ pub async fn auth_verify(
         .as_ref()
         .and_then(|c| c.labels.clone())
         .unwrap_or_default();
+    // 归属校验以容器 label 为准，不信任子域名中的 owner 段。
     let owner = labels.get("cs-owner").cloned().unwrap_or_default();
     let port: u16 = match labels.get("cs-port").and_then(|v| v.parse().ok()) {
         Some(p) if p > 0 => p,

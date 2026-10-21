@@ -7,11 +7,12 @@
 ## 当前代码状态
 
 - 分支：`feature/csrf-protection`
-- 最新提交：`7ee95c5` — 代码结构重构（阶段一修复 + 阶段二优化，见 §4.2）；`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
-- 前序提交：`6069dba`（响应式 toast 反馈与移动端资源表单）、`3cf34a3`（容器资源运行时调整）、`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
-- 工作区状态：干净；`8c5a98a` 尚未推送到 `origin/feature/csrf-protection`
-- 验证：`cargo test --quiet -- --test-threads=1`，14 个测试通过（重构后合并重复测试）
-- 编译状态：`cargo check` 零警告零错误
+- 最新提交：（本地未提交）跨用户同名实例路由修复（Phase 3，见 §4.3）；已推送基线 `4b280cc`
+- 前序提交：`e8ff28e`（Nginx 迁移指南初稿）、`306cf60`（handlers 拆分子模块重构）、`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
+- 工作区状态：包含 Phase 3 改动（§4.3），待提交
+- 验证：`cargo test --quiet -- --test-threads=1`，**21 个测试通过**（14 个基线 + 7 个新增）
+- 编译状态：`cargo check` 零警告零错误；`cargo clippy --all-targets` 零警告
+- Nginx 配置：见 §13.1（基于生产实际配置），**需要手动更新正则字符集**（见 §13.1.2）
 - 生产状态：维护者此前报告手动编译并替换过 release；是否包含最新提交 `3cf34a3` 尚未确认。上线后需在实例卡片确认"更新资源"及成功/失败提示已出现
 
 ---
@@ -97,18 +98,18 @@
 ### 2.3 数据流：一次实例访问
 
 ```text
-浏览器请求 https://cs-test1.afanai.top/
+浏览器请求 https://cs-alice-test1.afanai.top/
 
-Nginx 匹配 ~^cs-(?<inst>[a-z0-9-]+).afanai.top$
+Nginx 匹配 ~^cs-(?<inst>[a-z0-9_-]+)\.afanai\.top$   → $inst = "alice-test1"
 
-触发 auth_request → 子请求 /api/auth/verify?instance=test1
+触发 auth_request → 子请求 /api/auth/verify?instance=alice-test1
 
 面板：
 a. 从 Cookie 读 cs_session
 b. 查 SQLite sessions 表，校验未过期
 c. 查 users 表，确认 must_change_password=0
-d. container_name(当前用户, test1) → inspect cs-<owner>-test1，读 label cs-owner、cs-port
-e. 校验当前用户是 owner 或 admin
+d. container_name_from_host("alice-test1") → "cs-alice-test1"，inspect 读 label cs-owner、cs-port
+e. 校验当前用户是 owner（cs-owner label）或 admin
 f. 返回 204 + X-CS-Port: 8200
 
 Nginx 取 $upstream_http_x_cs_port = 8200
@@ -118,7 +119,11 @@ proxy_pass http://127.0.0.1:8200
 code-server 返回 IDE 界面
 ```
 
-**关键点**：第 4 步任何一环失败，Nginx 都不会转发，实例端口从未暴露给外部。
+**关键点**：
+
+- 子域名 `cs-<owner>-<name>` 与容器名 `cs-<owner>-<name>` **一一对应**，无需拆分 owner；
+- 归属校验以容器 label `cs-owner` 为准，不信任子域名，防止越权；
+- 第 d 步任何一环失败，Nginx 都不会转发，实例端口从未暴露给外部。
 
 ---
 
@@ -217,6 +222,8 @@ code-server 返回 IDE 界面
 - `validate_resource_limits` / `update_resources`：校验边界并调用 Bollard `update_container` 原地更新 Memory 与 NanoCPUs
 - `start` / `stop` / `remove`
 - `pick_free_port`：从 8200–8299 找空闲
+- `container_name(owner, name)`：生成 `cs-<owner>-<name>` 容器名
+- `container_name_from_host(host_part)`：校验 Nginx 子域名捕获段并还原容器名（不拆分 owner）
 
 **`handlers/mod.rs`**（公共工具层）
 - `generate_csrf_token` / `get_or_create_csrf_token` / `validate_csrf_token`：CSRF 生成与校验
@@ -233,8 +240,9 @@ code-server 返回 IDE 界面
 **`handlers/instance.rs`**
 - `index`：按角色过滤实例，显示错误
 - `create_instance`：查重 → 分配端口 → 调 docker_ops
-- `update_instance_resources`：CSRF、登录状态、实例归属和数值校验后更新资源
-- `instance_action`：启停删，校验归属
+- `update_instance_resources` / `instance_action`：CSRF、登录状态校验后，按 `(owner, name)` 精确定位容器并操作
+- `resolve_container()`：解析目标容器名（非 admin 强制忽略表单 owner，防越权）
+- `inspect_owner()`：O(1) `inspect_container` 读取 `cs-owner` label
 
 **`handlers/admin.rs`**
 - `admin_users_page` / `admin_create_user` / `admin_reset_password` / `admin_delete_user`
@@ -279,13 +287,62 @@ code-server 返回 IDE 界面
 ### 4.2.3 验证结果
 
 - `cargo check`：0 警告，0 错误
-- `cargo test --quiet -- --test-threads=1`：14 个测试全部通过
+- `cargo test --quiet -- --test-threads=1`：14 个测试全部通过（重构后）
+- `cargo clippy --all-targets`：0 警告
 
 ### 4.2.4 遗留事项（下一阶段）
 
-- **跨用户同名实例的 hostname 仍会冲突**：`templates.rs` 与 Nginx 都用 `cs-<name>.<domain>`，未包含 owner；而容器名是 `cs-<owner>-<name>`。因此两个用户各建一个 `test1` 时，`auth_verify` 会按访问者身份解析到各自容器，但 Nginx 的 `server_name` 只能匹配一个，且卡片"打开"链接相同。需改为 `cs-<owner>-<name>.<domain>` 并同步 Nginx 正则与模板，属于独立改动（涉及线上 Nginx 配置），本次未做。
 - `auth_verify` 的修复未覆盖集成测试（当前测试均为单元测试，不启动 HTTP 服务）。
-- `instance_action` / `update_instance_resources` 用 `list_instances()` 全量列举来定位实例，实例多时代价较高，可改为直接 `container_name()` + `inspect`。
+- `instance_action` / `update_instance_resources` 的定位逻辑已在 §4.3 优化为 O(1) `inspect_container`。
+
+---
+
+## 4.3 跨用户同名实例路由修复（Phase 3）
+
+> 承接 §4.2，解决"不同用户拥有同名实例"这一核心功能的剩余缺陷。
+
+### 4.3.1 背景
+
+容器名是 `cs-<owner>-<name>`，但面板与 Nginx 此前都用 `cs-<name>.<domain>`：
+
+- **Nginx 层**：`server_name` 只能匹配一个子域名，两个用户的 `cs-web` 冲突；
+- **面板层**：`instance_action` / `update_instance_resources` 用 `list_instances(None)` 全量列举
+  后 `find(|i| i.name == name)`，同名实例会命中**他人**容器，导致误操作（admin 尤甚）。
+
+### 4.3.2 修复方案
+
+| 层次 | 变更 |
+|---|---|
+| 模板 | "打开"链接改为 `cs-<owner>-<name>.<suffix>`（`templates.rs`） |
+| 模板 | 资源/操作表单新增隐藏 `owner` 字段 |
+| Nginx | 正则捕获 `cs-` **之后全部内容**，直接作为容器名后缀（见 §13.1） |
+| `dashboard_ops` | 新增 `container_name_from_host()`：校验主机名段并加回 `cs-` 前缀 |
+| `auth_verify` | 用 `container_name_from_host()` 定位容器；归属校验以 `cs-owner` label 为准 |
+| `instance.rs` | 新增 `resolve_container()` + `inspect_owner()`，按 `(owner, name)` 精确 O(1) 定位 |
+
+### 4.3.3 关键设计决策
+
+1. **不拆分 owner**：用户名与实例名都可含 `-`，从 `<owner>-<name>` 反推 owner 会歧义。
+   Nginx 捕获后缀 + `cs-` 前缀即容器名，简单可靠。
+2. **不信任子域名中的 owner**：归属校验一律以容器 label `cs-owner` 为准，
+   防止通过构造子域名越权访问他人实例。
+3. **非 admin 强制 owner**：`resolve_container` 对非 admin 用户忽略表单 `owner`，
+   强制使用其自身用户名（单元测试锁定）。
+4. **字符集对齐**：`container_name_from_host` 接受 `_`，与面板用户名规则
+   （`admin_create_user` 允许下划线）保持一致，Nginx 正则同步为 `[a-z0-9_-]+`。
+
+### 4.3.4 验证
+
+- `cargo test --quiet -- --test-threads=1`：**21 个测试通过**（§4.2 的 14 个 + 新增 7 个）
+- 新增测试：
+  - `container_name_from_host_roundtrips_container_name`（往返一致性，核心不变量）
+  - `container_name_from_host_rejects_malformed_input`（拒绝非法输入）
+  - `container_name_from_host_accepts_valid_kebab_case`（边界）
+  - `container_name_from_host_accepts_underscores_in_username`（下划线用户名）
+  - `member_cannot_target_another_users_container`（越权防护）
+  - `admin_honors_owner_hint`（admin 可操作任意用户实例）
+  - `same_instance_name_resolves_to_distinct_containers`（同名实例隔离）
+- `cargo clippy --all-targets`：0 警告
 
 ---
 
@@ -367,12 +424,12 @@ sudo journalctl -u cs-manager -n 30 --no-pager
 |---|---|---|---|
 | 1 | 面板可访问 | `curl -6 -I https://cs.afanai.top/login` | 200 |
 | 2 | 登录成功 | 浏览器登录 admin | 进入首页 |
-| 3 | 创建实例 | 面板创建 test1 | 卡片出现 running |
-| 4 | 容器在跑 | `docker ps --filter label=cs-manager=true` | test1 Up |
+| 3 | 创建实例 | 面板创建 test1（owner=alice） | 卡片出现 running |
+| 4 | 容器在跑 | `docker ps --filter label=cs-manager=true` | cs-alice-test1 Up |
 | 5 | 实例直连 | `curl -I http://127.0.0.1:8200/` | 302/200 |
-| 6 | 实例通过 Nginx | 浏览器 `https://cs-test1.afanai.top/` | code-server 界面 |
-| 7 | 未登录拒绝 | `curl -6 -I https://cs-test1.afanai.top/` | 302 到 login |
-| 8 | 他人访问拒绝 | alice 登录后访问 test1 | 403 |
+| 6 | 实例通过 Nginx | 浏览器 `https://cs-alice-test1.afanai.top/` | code-server 界面 |
+| 7 | 未登录拒绝 | `curl -6 -I https://cs-alice-test1.afanai.top/` | 302 到 login |
+| 8 | 他人访问拒绝 | bob 登录后访问 cs-alice-test1 | 403 |
 | 9 | 重启自恢复 | `sudo reboot` 后重复 1–6 | 全部通过 |
 
 ---
@@ -400,7 +457,7 @@ sudo journalctl -u cs-manager -n 30 --no-pager
 
 ### 6.3 Cookie 域：跨子域名的关键
 
-**问题**：用户登录 `cs.afanai.top`，访问 `cs-test1.afanai.top` 时浏览器不发送 Cookie。
+**问题**：用户登录 `cs.afanai.top`，访问 `cs-alice-test1.afanai.top` 时浏览器不发送 Cookie。
 
 **原因**：未指定 Domain 的 Cookie 是 host-only，只对设置它的域名生效。
 
@@ -551,7 +608,7 @@ sudo nginx -T 2>/dev/null | grep -n "server_name cs.afanai.top"
 
 ```bash
 dig AAAA cs.afanai.top +short
-dig AAAA cs-test1.afanai.top +short
+dig AAAA cs-alice-test1.afanai.top +short
 # 两者应返回同一个公网 IPv6
 ```
 
@@ -900,6 +957,22 @@ if docker.inspect_image(spec.image).await.is_err() {
 
 **改动**：分三个阶段，阶段一（紧急修复）与阶段二（结构优化）已完成，详见 §4.2。阶段三（可选，未做）：为 `docker_ops` 与 `auth` 补充集成测试、引入 `cargo clippy` 到 CI。
 
+### 11.10 P1：跨用户同名实例路由修复 ✅ 已完成（见 §4.3）
+
+**问题**：容器名是 `cs-<owner>-<name>`，但面板"打开"链接与旧 Nginx 配置都用 `cs-<name>.<domain>`，导致两个用户各建 `test1` 时无法区分；同时面板内部用"全量列举 + 按名字查找"定位实例，同名时会命中他人容器。
+
+**已完成**：
+
+1. **子域名改为 `cs-<owner>-<name>.<domain>`**（`templates.rs` 的"打开"链接）；
+2. **Nginx 正则捕获全部后缀**，直接还原容器名，**不拆分 owner**（避免用户/实例名含 `-` 时歧义），详见 §13.1；
+3. **`auth_verify` 用 `container_name_from_host()` 定位容器**，归属校验以容器 `cs-owner` label 为准，不信任子域名；
+4. **面板内部路由（启停删 / 更新资源）改为按 `(owner, name)` 精确定位**，消除同名歧义与越权风险（`resolve_container` + `inspect_owner`）；
+5. **表单新增 `owner` 隐藏字段**：非 admin 用户该字段被服务端忽略（强制用自身用户名），admin 可据此操作任意用户实例。
+
+**安全要点**：非 admin 用户提交伪造的 `owner` 会被忽略（`resolve_container` 测试锁定），防止越权操作他人同名实例。
+
+**遗留**：现有实例的旧域名 `cs-<name>.<domain>` 需重新创建或手动补 `owner` 段才能访问。
+
 ---
 
 ## 12. 故障排查速查表
@@ -912,26 +985,34 @@ if docker.inspect_image(spec.image).await.is_err() {
 | 实例访问 500 | `auth_request` 失败 | `journalctl -u cs-manager -f` |
 | 实例访问 302 到 login | 未登录或 Cookie 没带上 | 浏览器开发者工具看 Cookie |
 | 实例访问 403 | 不是 owner | 检查 `docker inspect <name>` 的 `cs-owner` |
+| 实例访问 404 | 子域名与容器名不匹配 | `docker ps --filter label=cs-manager=true`，确认容器名为 `cs-<owner>-<name>` |
+| 实例访问 400 | 子域名段含非法字符 | 检查用户名/实例名是否含 `_` 且 Nginx 正则未含 `[a-z0-9_-]`（见 §13.1.2） |
 | 实例 502 | 端口没映射上 | `docker port <name>`、`ss -lntp \| grep 82` |
 | 容器反复 Restarting | 启动参数错 | `docker logs <name> --tail 50` |
 | 创建实例报 404 | 镜像没拉 | `docker images \| grep codercom` |
 | 创建实例无反应 | 名称重复或端口耗尽 | 看 URL 的 `?err=` |
 | 改密后仍被拦截 | 旧会话没清 | 删浏览器 Cookie 重登 |
 | 重启后实例不在 | restart policy 没生效 | `docker inspect <name> --format '{{.HostConfig.RestartPolicy.Name}}'` |
-| DNS 解析不到 | 泛解析没配 | `dig AAAA cs-test1.afanai.top +short` |
+| DNS 解析不到 | 泛解析没配 | `dig AAAA cs-alice-test1.afanai.top +short` |
+| 操作他人同名实例被拒 | 归属校验生效（预期行为） | 非 admin 只能操作自己的实例，admin 需携带正确 `owner` |
 | 只有 IPv6 能访问 | 访问者无 IPv6 | 网络层限制，非配置问题 |
 
 ---
 
 ## 13. 附录：关键配置全文
 
-### 13.1 /etc/nginx/conf.d/cs-manager.conf
+### 13.1 /etc/nginx/conf.d/cs-manager.conf（生产实际配置）
+
+> 以下为线上实际使用的配置。核心思路：`server_name` 正则捕获 `cs-` 之后的
+> **全部内容**（`<owner>-<name>`），直接作为容器名后缀，因此**无需拆分 owner**。
 
 ```nginx
 # 面板入口
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
+    listen 10004 ssl;          # 备用端口
+    listen [::]:10004 ssl;
     server_name cs.afanai.top;
 
     ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
@@ -950,129 +1031,80 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
-    server_name ~^cs-(?<owner>[a-z0-9-]+)-(?<inst>[a-z0-9-]+)\.afanai\.top$;  # ← 修改正则
+    listen 10004 ssl;
+    listen [::]:10004 ssl;
+    # 捕获 `cs-` 之后全部内容（即 <owner>-<name>），即容器名去掉 `cs-` 前缀
+    server_name ~^cs-(?<inst>[a-z0-9_-]+)\.afanai\.top$;
 
     ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/afanai.top/privkey.pem;
 
     location / {
-        auth_request /api/auth/verify;
-        auth_request_set $auth_status $upstream_status;
-        auth_request_set $auth_port $upstream_http_x_cs_port;
-        auth_request_set $auth_user $upstream_http_x_cs_user;
+        auth_request /_auth;
+        auth_request_set $cs_port $upstream_http_x_cs_port;
 
-        proxy_pass http://127.0.0.1:$auth_port;
+        error_page 401 = @login;
+        error_page 403 = @forbidden;
+        error_page 428 = @change_pw;
+
+        proxy_pass http://127.0.0.1:$cs_port;
+        proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
-        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
     }
 
-    location = /api/auth/verify {
+    location = /_auth {
         internal;
-        proxy_pass http://127.0.0.1:8100;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
-        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
+        proxy_pass http://127.0.0.1:8100/api/auth/verify?instance=$inst;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header X-Original-URI $request_uri;
+    }
+
+    location @login {
+        return 302 https://cs.afanai.top/login;
+    }
+    location @forbidden {
+        return 403 "forbidden";
+    }
+    location @change_pw {
+        return 302 https://cs.afanai.top/change-password;
     }
 }
 ```
 
-### 13.2 Nginx 实例子域名配置（需手动更新）
+#### 13.1.1 为什么这样就够用
 
-**当前配置（有问题）**：
-```nginx
-# 实例子域名入口
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name ~^cs-(?<inst>[a-z0-9-]+)\.afanai\.top$;
+- 容器名由 `docker_ops::container_name(owner, name)` 生成为 `cs-<owner>-<name>`；
+- 子域名 `cs-<owner>-<name>.afanai.top` 与之**一一对应**；
+- Nginx 正则捕获 `cs-` 之后的全部内容为 `$inst`，面板端 `container_name_from_host($inst)`
+  直接加回 `cs-` 前缀即可定位容器，**不需要也不应该**拆分 owner（用户名与实例名都可含 `-`，拆分会歧义）；
+- 归属校验以容器 label `cs-owner` 为准，**不信任**子域名中的 owner 段，防止越权。
 
-    ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/afanai.top/privkey.pem;
+#### 13.1.2 匹配字符集必须与用户名规则一致 ⚠️
 
-    location / {
-        auth_request /api/auth/verify;
-        auth_request_set $auth_status $upstream_status;
-        auth_request_set $auth_port $upstream_http_x_cs_port;
-        auth_request_set $auth_user $upstream_http_x_cs_user;
+面板允许用户名包含 **下划线 `_`**（见 `admin_create_user` 的校验）。因此：
 
-        proxy_pass http://127.0.0.1:$auth_port;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Instance $inst;  # ← 仅传递 instance 名
-    }
+- Nginx 正则必须写成 `[a-z0-9_-]+`，**不能**只写 `[a-z0-9-]+`；
+- 否则用户名含 `_` 的实例域名（如 `cs-foo_bar-web.afanai.top`）无法匹配 → 实例不可访问。
+- 这一点由 `docker_ops::container_name_from_host` 的单元测试锁定（`container_name_from_host_accepts_underscores_in_username`）。
 
-    location = /api/auth/verify {
-        internal;
-        proxy_pass http://127.0.0.1:8100;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Instance $inst;  # ← 仅传递 instance 名
-    }
-}
-```
+#### 13.1.3 若沿用旧配置（仅 `?instance=$inst`，无条件拆分 owner）
 
-**修改后配置（支持 owner）**：
-```nginx
-# 实例子域名入口
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    server_name ~^cs-(?<owner>[a-z0-9-]+)-(?<inst>[a-z0-9-]+)\.afanai\.top$;  # ← 修改正则
+**旧正则** `~^cs-(?<inst>[a-z0-9-]+)\.afanai\.top$` 配合仅传 `instance` 时，功能与新版**完全等价**
+（因为 `$inst` 已经包含 `<owner>-<name>`），唯二差异是：
 
-    ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/afanai.top/privkey.pem;
-
-    location / {
-        auth_request /api/auth/verify;
-        auth_request_set $auth_status $upstream_status;
-        auth_request_set $auth_port $upstream_http_x_cs_port;
-        auth_request_set $auth_user $upstream_http_x_cs_user;
-
-        proxy_pass http://127.0.0.1:$auth_port;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
-        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
-    }
-
-    location = /api/auth/verify {
-        internal;
-        proxy_pass http://127.0.0.1:8100;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
-        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
-    }
-}
-```
-
-**验证命令**：
-```bash
-# 测试正则匹配
-echo "cs-a-test1.afanai.top" | perl -ne 'print if /^cs-(\w+)-(\w+)\.afanai\.top$/'
-# 应输出：cs-a-test1.afanai.top
-
-# 检查 Nginx 配置语法
-sudo nginx -t
-
-# 重载配置（确认无误后）
-sudo systemctl reload nginx
-```
+1. 旧正则的字符集不含 `_`，含下划线的用户名无法访问；
+2. 旧版依赖面板回退到"当前登录用户"来补 owner，跨用户"访问他人实例"场景（admin）会失效。
 
 ### 13.2 /etc/systemd/system/cs-manager.service
 

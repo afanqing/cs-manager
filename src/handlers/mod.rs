@@ -48,6 +48,9 @@ pub struct CreateForm {
 pub struct ActionForm {
     pub act: String,
     pub csrf_token: Option<String>,
+    /// 实例归属用户名。用于在跨用户同名实例场景下精确定位容器；
+    /// 非 admin 用户提交此字段无效（服务端强制使用其自身用户名）。
+    pub owner: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +58,8 @@ pub struct ResourceUpdateForm {
     pub mem: u32,
     pub cpus: f32,
     pub csrf_token: Option<String>,
+    /// 实例归属用户名，语义同 [`ActionForm::owner`]。
+    pub owner: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +83,8 @@ pub struct CsrfForm {
 
 #[derive(Deserialize)]
 pub struct VerifyQuery {
+    /// Nginx 从 `cs-<owner>-<name>.<domain>` 子域名中捕获的 `cs-` 之后部分，
+    /// 即 `<owner>-<name>`。加回 `cs-` 前缀即为容器名，无需再拆分 owner。
     pub instance: String,
 }
 
@@ -217,6 +224,8 @@ pub fn copy_csrf_cookie<B1, B2>(src: &axum::http::Response<B1>, dst: &mut axum::
 /// 验证 CSRF token，失败时返回 403 响应。
 ///
 /// 用于 POST handler 中统一处理 CSRF 校验失败的情况。
+// Err 变体是完整的 HTTP 响应，这里刻意保留以便调用方直接返回。
+#[allow(clippy::result_large_err)]
 pub fn require_csrf(jar: &CookieJar, token: Option<&str>) -> Result<(), Response> {
     if !validate_csrf_token(jar, token) {
         Err((StatusCode::FORBIDDEN, "CSRF 校验失败").into_response())
@@ -229,6 +238,8 @@ pub fn require_csrf(jar: &CookieJar, token: Option<&str>) -> Result<(), Response
 ///
 /// 未登录则重定向到登录页；待改密则重定向到改密页。
 /// 返回的 `kind` 为 `"full"` 或 `"pending_reset"`。
+// Err 变体是完整的 HTTP 响应，这里刻意保留以便调用方直接返回。
+#[allow(clippy::result_large_err)]
 pub async fn require_user(state: &AppState, jar: &CookieJar) -> Result<(User, String), Response> {
     let (user, kind, _) = match current(state, jar).await {
         Some(v) => v,
