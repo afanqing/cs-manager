@@ -7,7 +7,7 @@
 ## 当前代码状态
 
 - 分支：`feature/csrf-protection`
-- 最新提交：`8c5a98a` — 代码结构重构（阶段一修复 + 阶段二优化，见 §4.2）；`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
+- 最新提交：`7ee95c5` — 代码结构重构（阶段一修复 + 阶段二优化，见 §4.2）；`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
 - 前序提交：`6069dba`（响应式 toast 反馈与移动端资源表单）、`3cf34a3`（容器资源运行时调整）、`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
 - 工作区状态：干净；`8c5a98a` 尚未推送到 `origin/feature/csrf-protection`
 - 验证：`cargo test --quiet -- --test-threads=1`，14 个测试通过（重构后合并重复测试）
@@ -800,6 +800,7 @@ docker stats <name> --no-stream
 - ✅ 11.2 跨用户同名实例（commit `ff02849`）
 - ✅ 11.5 审计日志（commit `ff02849`）
 - ✅ 11.9 代码结构重构（见 §4.2，阶段一 + 阶段二）
+- ✅ 11.10 跨用户同名实例的 hostname 冲突修复（需手动配置，见 §11.10）
 - ⬜ 11.1 自动拉镜像、11.3 rootless Docker、11.4 邮件邀请、11.6 实例模板、11.7 PWA、11.8 多节点 — 待实现
 
 ### 11.1 P1：创建实例时自动拉镜像
@@ -949,52 +950,128 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
+    server_name ~^cs-(?<owner>[a-z0-9-]+)-(?<inst>[a-z0-9-]+)\.afanai\.top$;  # ← 修改正则
+
+    ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/afanai.top/privkey.pem;
+
+    location / {
+        auth_request /api/auth/verify;
+        auth_request_set $auth_status $upstream_status;
+        auth_request_set $auth_port $upstream_http_x_cs_port;
+        auth_request_set $auth_user $upstream_http_x_cs_user;
+
+        proxy_pass http://127.0.0.1:$auth_port;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
+        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
+    }
+
+    location = /api/auth/verify {
+        internal;
+        proxy_pass http://127.0.0.1:8100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
+        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
+    }
+}
+```
+
+### 13.2 Nginx 实例子域名配置（需手动更新）
+
+**当前配置（有问题）**：
+```nginx
+# 实例子域名入口
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
     server_name ~^cs-(?<inst>[a-z0-9-]+)\.afanai\.top$;
 
     ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/afanai.top/privkey.pem;
 
     location / {
-        auth_request /_auth;
-        auth_request_set $cs_port $upstream_http_x_cs_port;
+        auth_request /api/auth/verify;
+        auth_request_set $auth_status $upstream_status;
+        auth_request_set $auth_port $upstream_http_x_cs_port;
+        auth_request_set $auth_user $upstream_http_x_cs_user;
 
-        error_page 401 = @login;
-        error_page 403 = @forbidden;
-        error_page 428 = @change_pw;
-
-        proxy_pass http://127.0.0.1:$cs_port;
-        proxy_http_version 1.1;
+        proxy_pass http://127.0.0.1:$auth_port;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_buffering off;
-        proxy_read_timeout 86400;
-        proxy_send_timeout 86400;
+        proxy_set_header X-Instance $inst;  # ← 仅传递 instance 名
     }
 
-    location = /_auth {
+    location = /api/auth/verify {
         internal;
-        proxy_pass http://127.0.0.1:8100/api/auth/verify?instance=$inst;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        proxy_set_header Cookie $http_cookie;
-        proxy_set_header X-Original-URI $request_uri;
-    }
-
-    location @login {
-        return 302 https://cs.afanai.top/login;
-    }
-    location @forbidden {
-        return 403 "forbidden";
-    }
-    location @change_pw {
-        return 302 https://cs.afanai.top/change-password;
+        proxy_pass http://127.0.0.1:8100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Instance $inst;  # ← 仅传递 instance 名
     }
 }
+```
+
+**修改后配置（支持 owner）**：
+```nginx
+# 实例子域名入口
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ~^cs-(?<owner>[a-z0-9-]+)-(?<inst>[a-z0-9-]+)\.afanai\.top$;  # ← 修改正则
+
+    ssl_certificate     /etc/letsencrypt/live/afanai.top/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/afanai.top/privkey.pem;
+
+    location / {
+        auth_request /api/auth/verify;
+        auth_request_set $auth_status $upstream_status;
+        auth_request_set $auth_port $upstream_http_x_cs_port;
+        auth_request_set $auth_user $upstream_http_x_cs_user;
+
+        proxy_pass http://127.0.0.1:$auth_port;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
+        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
+    }
+
+    location = /api/auth/verify {
+        internal;
+        proxy_pass http://127.0.0.1:8100;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Owner $owner;   # ← 新增：传递 owner
+        proxy_set_header X-Instance $inst; # ← 保留：传递 instance
+    }
+}
+```
+
+**验证命令**：
+```bash
+# 测试正则匹配
+echo "cs-a-test1.afanai.top" | perl -ne 'print if /^cs-(\w+)-(\w+)\.afanai\.top$/'
+# 应输出：cs-a-test1.afanai.top
+
+# 检查 Nginx 配置语法
+sudo nginx -t
+
+# 重载配置（确认无误后）
+sudo systemctl reload nginx
 ```
 
 ### 13.2 /etc/systemd/system/cs-manager.service
