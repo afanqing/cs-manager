@@ -11,6 +11,8 @@ body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; background
 .card { background: #fff; padding: 1em 1.2em; margin: 1em 0; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 .running { color: #2e7d32; font-weight: bold; }
 .exited, .created, .stopped, .paused, .restarting { color: #999; }
+/* 防止 Safari 移动端自动聚焦 */
+input:not([autofocus]) { outline: none; }
 .btn {
     padding: 5px 12px;
     margin: 2px;
@@ -35,6 +37,41 @@ body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; background
     color: #cf1322;
     border-color: #ffa39e;
 }
+.create-form .form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.create-form .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 180px;
+    min-width: 180px;
+}
+.create-form .form-group-wide {
+    flex: 2 1 300px;
+}
+.create-form .form-label {
+    font-size: 0.85em;
+    color: #666;
+    font-weight: 500;
+}
+.create-form input,
+.create-form select {
+    padding: 8px 10px;
+    border: 1px solid #d9d9d9;
+    border-radius: 6px;
+    font-size: 0.95em;
+    transition: border-color 0.2s;
+}
+.create-form input:focus,
+.create-form select:focus {
+    outline: none;
+    border-color: #1677ff;
+    box-shadow: 0 0 0 2px rgba(22,119,255,0.1);
+}
 .resource-hint { display: block; margin-top: 6px; color: #666; font-size: 0.85em; }
 form { display: inline; }
 .resource-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
@@ -50,19 +87,100 @@ h2, h3 { margin-top: 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.5em; border-bottom: 1px solid #eee; }
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.collapsible { display: none; margin-top: 12px; }
+.collapsible.show { display: block; }
+.collapsible .form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.collapsible .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 180px;
+    min-width: 180px;
+}
+.collapsible .form-group-wide {
+    flex: 2 1 300px;
+}
+.collapsible .form-label {
+    font-size: 0.85em;
+    color: #666;
+    font-weight: 500;
+}
+.collapsible input,
+.collapsible select {
+    padding: 6px 8px;
+    border: 1px solid #d9d9d9;
+    border-radius: 5px;
+    font-size: 0.95em;
+    transition: border-color 0.2s;
+}
+.collapsible input:focus,
+.collapsible select:focus {
+    outline: none;
+    border-color: #1677ff;
+    box-shadow: 0 0 0 2px rgba(22,119,255,0.1);
+}
+.collapsible .form-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+}
 
 @media (max-width: 640px) {
     .container { padding: 0.8em; }
     .topbar { flex-direction: column; align-items: flex-start; gap: 0.4em; }
+    .topbar > div {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 8px;
+        font-size: 0.9em;
+    }
+    .topbar > div a, .topbar > div form {
+        white-space: nowrap;
+    }
     .card { padding: 0.8em; }
-    form { display: block; width: 100%; }
-    form input, form select {
+    .collapsible { display: none !important; }
+    .collapsible.show { display: block !important; }
+    .collapsible .form-row {
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .collapsible .form-group {
+        flex: 1 1 auto;
+        min-width: unset;
+    }
+    .collapsible .form-group-wide {
+        width: 100%;
+        flex: 1 1 100%;
+    }
+    .collapsible .form-actions {
+        flex-direction: row;
+        gap: 6px;
+    }
+    .collapsible .form-actions button {
+        flex: 1;
+        width: auto !important;
+    }
+    .resource-form { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .resource-form input, .resource-form select {
+        margin: 0 !important;
+        padding: 6px 8px !important;
+        font-size: 0.9em !important;
+    }
+    form:not(.resource-form) { display: block; width: 100%; }
+    form:not(.resource-form) input, form:not(.resource-form) select {
         display: block;
         width: 100% !important;
         margin: 0 0 8px 0 !important;
         box-sizing: border-box;
     }
-    form > button, form > .btn {
+    form:not(.resource-form) > button, form:not(.resource-form) > .btn {
         display: block;
         width: 100%;
         margin: 6px 0 0 0;
@@ -98,12 +216,14 @@ pub fn layout(user: Option<&User>, body: Markup, csrf_token: &str) -> Markup {
                                 span { "用户: " (u.username) " (" (u.role) ")" }
                                 " | "
                                 a href="/" { "首页" }
-                                " | "
-                                a href="/admin/users" { "用户管理" }
-                                " | "
-                                a href="/admin/images" { "镜像管理" }
-                                " | "
-                                a href="/admin/audit-logs" { "审计日志" }
+                                @if u.role == "admin" {
+                                    " | "
+                                    a href="/admin/users" { "用户管理" }
+                                    " | "
+                                    a href="/admin/images" { "镜像管理" }
+                                    " | "
+                                    a href="/admin/audit-logs" { "审计日志" }
+                                }
                                 " | "
                                 form method="post" action="/logout" {
                                     input type="hidden" name="csrf_token" value=(csrf_token);
@@ -185,24 +305,47 @@ pub fn index_page(
         }
         div .card {
             h3 { "创建新实例" }
-            form method="post" action="/instances" {
+            button type="button" class="btn" id="create-toggle" onclick="document.getElementById('create-form').classList.toggle('show');this.style.display='none'" { "创建实例" }
+            form id="create-form" method="post" action="/instances" class="collapsible" {
                 input type="hidden" name="csrf_token" value=(csrf_token);
-                input name="name" placeholder="实例名称（小写字母/数字/-）" required;
-                input name="mem" type="number" value="1024" min="256" max="8192" style="width:90px" placeholder="内存MB";
-                input name="cpus" type="number" step="0.1" value="1" min="0.1" max="8" style="width:70px" placeholder="CPU";
-                input name="git" placeholder="Git 仓库（可选）" style="width:280px";
-                @if !images.is_empty() {
-                    select name="image_id" {
-                        @for img in images {
-                            @if img.is_default {
-                                option value=(img.id) selected { (img.name) " (" (img.image) ")" }
-                            } @else {
-                                option value=(img.id) { (img.name) " (" (img.image) ")" }
+                div .form-row {
+                    label .form-group {
+                        span .form-label { "实例名称 *" }
+                        input name="name" placeholder="小写字母/数字/-" required;
+                    }
+                    label .form-group {
+                        span .form-label { "内存 (MB)" }
+                        input name="mem" type="number" value="1024" min="256" max="8192" step="256";
+                    }
+                    label .form-group {
+                        span .form-label { "CPU 核数" }
+                        input name="cpus" type="number" step="0.1" value="1" min="0.1" max="8";
+                    }
+                }
+                div .form-row {
+                    @if !images.is_empty() {
+                        label .form-group {
+                            span .form-label { "镜像" }
+                            select name="image_id" {
+                                @for img in images {
+                                    @if img.is_default {
+                                        option value=(img.id) selected { (img.name) " (" (img.image) ")" }
+                                    } @else {
+                                        option value=(img.id) { (img.name) " (" (img.image) ")" }
+                                    }
+                                }
                             }
                         }
                     }
+                    label .form-group .form-group-wide {
+                        span .form-label { "Git 仓库（可选）" }
+                        input name="git" placeholder="https://github.com/user/repo.git";
+                    }
                 }
-                button type="submit" class="btn btn-primary" { "创建" }
+                div .form-actions {
+                    button type="submit" class="btn btn-primary" { "确认创建" }
+                    button type="button" class="btn" onclick="this.closest('.collapsible').classList.remove('show');document.getElementById('create-toggle').style.display=''" { "取消" }
+                }
             }
         }
         h3 { "实例列表" }
@@ -223,33 +366,41 @@ pub fn index_page(
                         "Owner: " (inst.owner) " | 内存: " (inst.mem) "MB | CPU: " (inst.cpus) " | 端口: 127.0.0.1:" (inst.port)
                     }
                     br;
-                    form method="post" action={ "/instances/" (inst.name) "/resources" } class="resource-form" {
-                        input type="hidden" name="csrf_token" value=(csrf_token);
-                        // 跨用户同名实例：必须带上 owner 才能精确定位目标容器
-                        input type="hidden" name="owner" value=(inst.owner);
-                        label {
-                            "内存 "
-                            input name="mem" type="number" value=(inst.mem) min="256" max="8192" step="256" placeholder="例如：1024" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="width:90px";
-                            " MB"
+                    div id={ "res-" (inst.name) } class="collapsible" {
+                        form method="post" action={ "/instances/" (inst.name) "/resources" } class="resource-form" {
+                            input type="hidden" name="csrf_token" value=(csrf_token);
+                            input type="hidden" name="owner" value=(inst.owner);
+                            div .form-row {
+                                label .form-group {
+                                    span .form-label { "内存 (MB)" }
+                                    input name="mem" type="number" value=(inst.mem) min="256" max="8192" step="256" placeholder="例如：1024";
+                                }
+                                label .form-group {
+                                    span .form-label { "CPU 核数" }
+                                    input name="cpus" type="number" value=(inst.cpus) min="0.1" max="8" step="0.1" placeholder="例如：2.0";
+                                }
+                            }
+                            p .resource-hint {
+                                "范围：内存 256–8192 MB，CPU 0.1–8 核。修改即时生效，无需重启。"
+                            }
+                            div .form-actions {
+                                button type="submit" class="btn btn-primary" { "应用" }
+                                button type="button" class="btn" onclick={ "this.closest('.collapsible').classList.remove('show');document.getElementById('res-toggle-' + '" (inst.name) "').style.display='';document.getElementById('actions-' + '" (inst.name) "').style.display=''" } { "取消" }
+                            }
                         }
-                        label {
-                            "CPU "
-                            input name="cpus" type="number" value=(inst.cpus) min="0.1" max="8" step="0.1" placeholder="例如：2.0" inputmode="numeric" pattern="[0-9.]*" autocomplete="off" style="width:80px";
-                        }
-                        button type="submit" class="btn btn-primary" { "更新资源" }
-                    }
-                    span .resource-hint {
-                        "内存范围：256–8192 MB；CPU 范围：0.1–8 核。限制即时应用，无需重启。"
                     }
                     br;
                     form method="post" action={ "/instances/" (inst.name) "/action" } {
                         input type="hidden" name="csrf_token" value=(csrf_token);
                         // 跨用户同名实例：必须带上 owner 才能精确定位目标容器
                         input type="hidden" name="owner" value=(inst.owner);
-                        button name="act" value="start" class="btn" { "启动" }
-                        button name="act" value="stop" class="btn" { "停止" }
-                        button name="act" value="remove" class="btn btn-danger"
-                               onclick="return confirm('确认删除容器？数据目录会保留。')" { "删除" }
+                        button type="button" class="btn" id={ "res-toggle-" (inst.name) } onclick={ "document.getElementById('res-' + '" (inst.name) "').classList.toggle('show');this.style.display='none';document.getElementById('actions-' + '" (inst.name) "').style.display='none'" } { "调整资源" }
+                        span id={ "actions-" (inst.name) } {
+                            button name="act" value="start" class="btn" { "启动" }
+                            button name="act" value="stop" class="btn" { "停止" }
+                            button name="act" value="remove" class="btn btn-danger"
+                                   onclick="return confirm('确认删除容器？数据目录会保留。')" { "删除" }
+                        }
                     }
                 }
             }
@@ -411,7 +562,6 @@ pub fn admin_images_page(
             div .card .ok role="status" { (m) }
         }
         div .card {
-            h4 { "添加新镜像" }
             form method="post" action="/admin/images" {
                 input type="hidden" name="csrf_token" value=(csrf_token);
                 input name="name" placeholder="镜像名称（如：Python 开发环境）" required style="width:200px";
