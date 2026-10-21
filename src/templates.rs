@@ -84,7 +84,7 @@ pub fn layout(user: Option<&User>, body: Markup, csrf_token: &str) -> Markup {
         html {
             head {
                 meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1";
+                meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, user-scalable=no";
                 meta name="color-scheme" content="light";
                 title { "Code Server 管理器" }
                 style { (STYLE) }
@@ -208,12 +208,12 @@ pub fn index_page(
                         input type="hidden" name="csrf_token" value=(csrf_token);
                         label {
                             "内存 "
-                            input name="mem" type="number" value=(inst.mem) min="256" max="8192" step="256" style="width:90px";
+                            input name="mem" type="number" value=(inst.mem) min="256" max="8192" step="256" placeholder="例如：1024" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="width:90px";
                             " MB"
                         }
                         label {
                             "CPU "
-                            input name="cpus" type="number" value=(inst.cpus) min="0.1" max="8" step="0.1" style="width:80px";
+                            input name="cpus" type="number" value=(inst.cpus) min="0.1" max="8" step="0.1" placeholder="例如：2.0" inputmode="numeric" pattern="[0-9.]*" autocomplete="off" style="width:80px";
                         }
                         button type="submit" class="btn btn-primary" { "更新资源" }
                     }
