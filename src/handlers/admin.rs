@@ -24,7 +24,7 @@ pub async fn admin_users_page(State(state): State<AppState>, jar: CookieJar) -> 
 
     let users = load_users(&state).await;
     super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
-        templates::admin_users_page(&user, &users, None, token).into_response()
+        templates::admin_users_page(&user, &users, None, None, token).into_response()
     })
 }
 
@@ -89,7 +89,7 @@ pub async fn admin_create_user(
             );
             let users = load_users(&state).await;
             super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
-                templates::admin_users_page(&user, &users, Some(msg.as_str()), token).into_response()
+                templates::admin_users_page(&user, &users, None, Some(msg.as_str()), token).into_response()
             })
         }
         Err(_) => Redirect::to("/admin/users?err=dup").into_response(),
@@ -144,7 +144,7 @@ pub async fn admin_reset_password(
     );
     let users = load_users(&state).await;
     super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
-        templates::admin_users_page(&user, &users, Some(msg.as_str()), token).into_response()
+        templates::admin_users_page(&user, &users, None, Some(msg.as_str()), token).into_response()
     })
 }
 
@@ -209,7 +209,7 @@ pub async fn admin_delete_user(
         );
         let users = load_users(&state).await;
         return super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
-            templates::admin_users_page(&user, &users, Some(&msg), token).into_response()
+            templates::admin_users_page(&user, &users, Some(&msg), None, token).into_response()
         });
     }
 
@@ -233,7 +233,7 @@ pub async fn admin_delete_user(
     };
     let users = load_users(&state).await;
     super::render_with_csrf(&jar, state.config.cookie_domain.as_deref(), |token| {
-        templates::admin_users_page(&user, &users, Some(&msg), token).into_response()
+        templates::admin_users_page(&user, &users, None, Some(&msg), token).into_response()
     })
 }
 

@@ -7,9 +7,9 @@
 ## 当前代码状态
 
 - 分支：`feature/csrf-protection`
-- 最新提交：（本地未提交）跨用户同名实例路由修复（Phase 3，见 §4.3）；已推送基线 `4b280cc`
-- 前序提交：`e8ff28e`（Nginx 迁移指南初稿）、`306cf60`（handlers 拆分子模块重构）、`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
-- 工作区状态：包含 Phase 3 改动（§4.3），待提交
+- 最新提交：（本地未提交）用户管理页面错误提示补全（Phase 3 后续）；已推送 `7aaa157`（跨用户同名实例路由修复）
+- 前序提交：`7aaa157`（跨用户同名实例路由修复）、`e8ff28e`（Nginx 迁移指南初稿）、`306cf60`（handlers 拆分子模块重构）、`4b280cc` / `4ea09ae`（文档）、`f25756e`（修正交接文档信息）、`ff02849`（审计日志系统 + 跨用户同名实例支持）
+- 工作区状态：包含用户管理页面错误提示补全，待提交
 - 验证：`cargo test --quiet -- --test-threads=1`，**21 个测试通过**（14 个基线 + 7 个新增）
 - 编译状态：`cargo check` 零警告零错误；`cargo clippy --all-targets` 零警告
 - Nginx 配置：见 §13.1（基于生产实际配置），**需要手动更新正则字符集**（见 §13.1.2）
@@ -247,16 +247,18 @@ code-server 返回 IDE 界面
 **`handlers/admin.rs`**
 - `admin_users_page` / `admin_create_user` / `admin_reset_password` / `admin_delete_user`
 - `admin_audit_logs_page`：审计日志页面
+- 用户管理页面支持错误提示（`?err=name` / `dup` / `hash` / `self` / `notfound` / `last_admin`）
 
 **`handlers/auth_verify.rs`**
 - **Nginx auth_request 的核心端点**
-- 通过 `docker_ops::container_name()` 正确解析跨用户同名实例的容器名
+- 通过 `docker_ops::container_name_from_host()` 正确解析跨用户同名实例的容器名
 
 **`templates.rs`**
 - `layout`：公共外壳（顶栏、样式）
 - `login_page` / `change_password_page` / `index_page` / `admin_users_page` / `admin_audit_logs_page`
 - 首页实例卡片：当前内存/CPU、资源编辑表单、成功/错误状态提示
-- 实例卡片"打开"链接生成 `https://cs-<name>.<domain>/`
+- 实例卡片"打开"链接生成 `https://cs-<owner>-<name>.<domain>/`
+- 用户管理页面：区分错误（`err`）与成功（`ok`）消息，错误以红色 `.err` 样式显示
 
 ---
 
@@ -343,6 +345,40 @@ code-server 返回 IDE 界面
   - `admin_honors_owner_hint`（admin 可操作任意用户实例）
   - `same_instance_name_resolves_to_distinct_containers`（同名实例隔离）
 - `cargo clippy --all-targets`：0 警告
+
+---
+
+## 4.4 用户管理页面错误提示补全（Phase 3 后续）
+
+> 2026-10-21 完成，修复用户管理页面缺少错误反馈的问题。
+
+### 4.4.1 背景
+
+`admin_create_user` 在用户名非法时重定向到 `/admin/users?err=name`，但 `admin_users_page` 模板只处理了成功消息（`message: Option<&str>`），**完全没有处理 `?err=` 参数**。admin 输入非法用户名后页面刷新无任何反馈，让人误以为操作成功。
+
+### 4.4.2 修复方案
+
+| 文件 | 变更 |
+|---|---|
+| `templates.rs` | `admin_users_page` 签名从 `message: Option<&str>` 改为 `err: Option<&str>, ok: Option<&str>`，新增 `err_msg` 匹配逻辑 |
+| `handlers/admin.rs` | 所有调用点适配新签名：成功消息传 `ok`，错误消息传 `err` |
+
+### 4.4.3 支持的错误码
+
+| `?err=` 值 | 显示文本 |
+|---|---|
+| `name` | 用户名无效，只能包含字母、数字、下划线和连字符 |
+| `dup` | 用户名已存在 |
+| `hash` | 密码哈希失败，请查看日志 |
+| `self` | 不能删除自己 |
+| `notfound` | 用户不存在 |
+| `last_admin` | 不能删除最后一个管理员 |
+| 其他 | 直接显示原文（兼容 `delete_user` 等动态消息） |
+
+### 4.4.4 验证
+
+- `cargo check`：零警告零错误
+- `cargo test --quiet -- --test-threads=1`：21 个测试通过（无新增测试，本次为纯 UI 修复）
 
 ---
 

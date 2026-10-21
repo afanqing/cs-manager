@@ -243,12 +243,28 @@ pub fn index_page(
 pub fn admin_users_page(
     user: &User,
     users: &[(i64, String, String, i64)],
-    message: Option<&str>,
+    err: Option<&str>,
+    ok: Option<&str>,
     csrf_token: &str,
 ) -> Markup {
+    let err_msg = match err {
+        Some("name") => Some("用户名无效，只能包含字母、数字、下划线和连字符"),
+        Some("dup") => Some("用户名已存在"),
+        Some("hash") => Some("密码哈希失败，请查看日志"),
+        Some("self") => Some("不能删除自己"),
+        Some("notfound") => Some("用户不存在"),
+        Some("last_admin") => Some("不能删除最后一个管理员"),
+        Some(other) => Some(other),
+        None => None,
+    };
     layout(Some(user), html! {
         h3 { "用户管理" }
-        @if let Some(m) = message { div .card .ok { (m) } }
+        @if let Some(m) = err_msg {
+            div .card .err role="alert" { (m) }
+        }
+        @if let Some(m) = ok {
+            div .card .ok role="status" { (m) }
+        }
         div .card {
             form method="post" action="/admin/users" {
                 input type="hidden" name="csrf_token" value=(csrf_token);
