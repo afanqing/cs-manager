@@ -6,8 +6,8 @@
 
 ## 当前代码状态
 
-- 分支：`feature/ux-resource-feedback`（本地领先 `origin/feature/csrf-protection` 3 个提交，尚未推送）
-- 最新提交：`ff02849` — 审计日志系统 + 跨用户同名实例支持（含 9 个新测试）
+- 分支：`feature/csrf-protection`（本地领先 `origin/feature/csrf-protection` 3 个提交，尚未推送）
+- 最新提交：`f25756e` — 修正交接文档信息；`ff02849` — 审计日志系统 + 跨用户同名实例支持（含 9 个新测试）
 - 前序提交：`6069dba`（响应式 toast 反馈与移动端资源表单）、`3cf34a3`（容器资源运行时调整，已推送到 `origin/feature/csrf-protection`）、`2c5d409`（CSRF 保护）、`ec1db03`（README/HANDOFF 分工）
 - 工作区状态：干净；本地 HEAD `ff02849` 未推送到远程
 - 验证：`cargo test --quiet -- --test-threads=1`，17 个测试通过（原 8 + 审计日志/跨用户实例 9）
